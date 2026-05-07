@@ -28,6 +28,7 @@ def _config(state_dir: Path, *, dry_run: bool = True, max_concurrent: int = 1) -
         conductor_timeout_sec=60,
         review_timeout_sec=60,
         github_token_env="GITHUB_TOKEN",
+        assignee_user="@me",
     )
 
 
@@ -70,6 +71,8 @@ def _stub_all_external(
         "subprocess_run_args": [],
         "label_transitions": [],
         "label_creates": [],
+        "assignee_changes": [],
+        "activity_comments": [],
         "push_calls": [],
         "pr_creates": [],
     }
@@ -87,15 +90,22 @@ def _stub_all_external(
             captured["label_creates"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
+        if "issue" in cmd and "edit" in cmd and (
+            "--add-assignee" in cmd or "--remove-assignee" in cmd
+        ):
+            captured["assignee_changes"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
         if "issue" in cmd and "edit" in cmd:
             captured["label_transitions"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
+        if "issue" in cmd and "comment" in cmd:
+            captured["activity_comments"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
         if "repo" in cmd and "view" in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
-
-        if "issue" in cmd and "comment" in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "pr" in cmd and "create" in cmd:
             captured["pr_creates"].append(cmd)
@@ -462,3 +472,75 @@ def test_ensure_labels_runs_before_clone_in_live_mode(
     assert max(label_create_indices) < min(git_clone_indices), (
         "labels must be ensured before any git clone"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue claiming (alchemist#23)                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_live_run_assigns_and_comments_on_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Live run posts a 'starting work' comment + assigns the issue to the
+    configured assignee_user."""
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+    run_tick(config)
+    assert any(
+        "--add-assignee" in cmd for cmd in captured["assignee_changes"]
+    ), "expected an --add-assignee call"
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("claiming this issue" in b for b in bodies), (
+        f"expected a 'claiming' comment; got {bodies}"
+    )
+
+
+def test_live_run_comments_on_ship(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """After successful merge, alchemist posts a 'shipped' comment with the PR url."""
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+    run_tick(config)
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("shipped" in b and "/pull/9001" in b for b in bodies), (
+        f"expected a 'shipped' comment with the PR url; got {bodies}"
+    )
+
+
+def test_dry_run_skips_assignee_and_activity_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=True)
+    run_tick(config)
+    assert captured["assignee_changes"] == []
+    assert captured["activity_comments"] == []
+
+
+def test_assignee_failure_does_not_block_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """If `gh issue edit --add-assignee` fails (e.g., user not in org), the run
+    continues. Comment claim is the backup."""
+    from alchemist import runner as _runner_mod
+
+    real_set_assignee = _runner_mod._set_assignee
+
+    def failing_set_assignee(repo, issue_number, action, assignee, config):
+        if action == "add":
+            raise _runner_mod._GhError("not in org")
+        # remove-action would never fire in this test
+        return real_set_assignee(repo, issue_number, action, assignee, config)
+
+    monkeypatch.setattr(_runner_mod, "_set_assignee", failing_set_assignee)
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+    results = run_tick(config)
+    assert len(results) == 1
+    r = results[0]
+    assert r.error is None, f"assignee failure should not block the run; got error={r.error!r}"
+    assert r.merged is True
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    # The comment claim still posted (backup signal) even though assign failed.
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("claiming" in b for b in bodies)
