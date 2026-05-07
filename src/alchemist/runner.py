@@ -262,6 +262,12 @@ def _process_locked(
             "conductor produced no diff",
         )
 
+    diff_problem = _validate_diff(work_dir)
+    if diff_problem:
+        # Conductor produced a diff but it doesn't parse cleanly. Bail before
+        # staging/pushing so we never open a PR with corrupted output.
+        return _bail(repo, issue, started, config, f"diff-validate: {diff_problem}")
+
     if config.dry_run:
         msg = (
             f"[DRY-RUN] {repo}#{issue.number}: would commit, push branch "
@@ -283,6 +289,7 @@ def _process_locked(
     body = render_pr_body(
         issue=issue,
         provider=config.default_provider,
+        agent_summary=_extract_agent_summary(transcript_path),
     )
     pr_title = f"{_PR_TITLE_PREFIX} fix: {issue.title} (#{issue.number})"
     try:
@@ -566,6 +573,68 @@ def _has_changes(repo_dir: Path) -> bool:
         cwd=repo_dir, capture_output=True, text=True, timeout=10,
     )
     return bool(result.stdout.strip())
+
+
+def _extract_agent_summary(transcript_path: Path, max_chars: int = 600) -> str | None:
+    """Pull a short "what the agent did" summary from conductor's transcript.
+
+    Heuristic: take the trailing N chars of the transcript. LLMs typically
+    end their tool-use loop with a natural-language wrap-up; the tail catches
+    that. If the tail is empty or only whitespace, return None and the PR
+    body just omits the summary section.
+
+    Capped at `max_chars` so PR bodies don't bloat. UTF-8 decode errors are
+    replaced (best-effort): we'd rather have a slightly garbled summary than
+    crash on a transcript byte sequence we can't read.
+    """
+    if not transcript_path.exists():
+        return None
+    try:
+        text = transcript_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    tail = text[-max_chars:].strip()
+    return tail or None
+
+
+def _validate_diff(repo_dir: Path) -> str | None:
+    """Sanity-check conductor's diff before staging.
+
+    Catches model-corruption-style outputs (hallucinated training-data
+    fragments, mojibake, broken syntax) at the alchemist boundary so we
+    bail before opening a PR full of garbage. Tier 1 today: Python files
+    only — `compile()` is fast and native, no external tools needed.
+
+    Returns an error message describing the first failure encountered, or
+    None if all changed files parse cleanly.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            ["git", "diff", "--name-only", "--diff-filter=AM"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        # Don't block on a transient git failure — let touchstone's review
+        # be the gate if this stage can't run cleanly.
+        return f"diff-list failed: {exc}"
+
+    for path in result.stdout.splitlines():
+        path = path.strip()
+        if not path:
+            continue
+        full = repo_dir / path
+        if not full.is_file():
+            continue
+        if path.endswith(".py"):
+            try:
+                source = full.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                return f"{path}: read failed: {exc}"
+            try:
+                compile(source, full.as_posix(), "exec")
+            except SyntaxError as exc:
+                return f"{path}: SyntaxError on line {exc.lineno}: {exc.msg}"
+    return None
 
 
 def _stage_and_commit(repo_dir: Path, message: str) -> None:

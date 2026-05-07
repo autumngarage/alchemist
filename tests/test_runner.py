@@ -656,3 +656,143 @@ def test_git_auth_prefix_uses_bearer_header():
     prefix = _git_auth_prefix("ghp_test123")
     assert prefix[:2] == ["git", "-c"]
     assert "http.extraheader=Authorization: Bearer ghp_test123" in prefix[2]
+
+
+# --------------------------------------------------------------------------- #
+# Diff validation (alchemist#32)                                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_diff_returns_none_for_clean_python(tmp_path: Path):
+    """Valid Python file → no error returned."""
+    from alchemist.runner import _validate_diff
+
+    # Stage a fake diff: simulate `git diff --name-only` returning one file.
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "diff" in cmd and "--name-only" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="good.py\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    (tmp_path / "good.py").write_text("def hello():\n    return 'world'\n")
+    import unittest.mock as _m
+    with _m.patch.object(subprocess, "run", side_effect=fake_run):
+        result = _validate_diff(tmp_path)
+    assert result is None
+
+
+def test_validate_diff_catches_python_syntax_error(tmp_path: Path):
+    """Malformed Python file → error message describing the file and issue."""
+    from alchemist.runner import _validate_diff
+
+    (tmp_path / "broken.py").write_text(
+        "def hello(\n    return 'unterminated paren'\n"
+    )
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "diff" in cmd and "--name-only" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="broken.py\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    import unittest.mock as _m
+    with _m.patch.object(subprocess, "run", side_effect=fake_run):
+        result = _validate_diff(tmp_path)
+
+    assert result is not None
+    assert "broken.py" in result
+    assert "SyntaxError" in result
+
+
+def test_validate_diff_skips_non_python_files(tmp_path: Path):
+    """README.md edits should pass through; we don't validate Markdown."""
+    from alchemist.runner import _validate_diff
+
+    (tmp_path / "README.md").write_text("# Random text\nNot Python; should not be parsed.\n")
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "diff" in cmd and "--name-only" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="README.md\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    import unittest.mock as _m
+    with _m.patch.object(subprocess, "run", side_effect=fake_run):
+        result = _validate_diff(tmp_path)
+    assert result is None
+
+
+def test_validate_diff_handles_corrupted_unicode_in_python(tmp_path: Path):
+    """The conductor#254 corruption pattern: hallucinated training-data
+    fragments (Chinese + Devanagari + tool-call syntax leakage) at module
+    scope. Python's parser rejects this as SyntaxError."""
+    from alchemist.runner import _validate_diff
+
+    (tmp_path / "runner.py").write_text(
+        "def hello():\n"
+        "    return 'ok'\n"
+        "\n"
+        # The actual corruption captured in conductor#254:
+        "'} +#+#+#+#+#+assistant to=functions.Edit კომენტary 彩神争霸破解_code 大发游戏json {\n"
+    )
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "diff" in cmd and "--name-only" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="runner.py\n", stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    import unittest.mock as _m
+    with _m.patch.object(subprocess, "run", side_effect=fake_run):
+        result = _validate_diff(tmp_path)
+    assert result is not None, "expected validation to catch corruption"
+    assert "SyntaxError" in result
+
+
+# --------------------------------------------------------------------------- #
+# Agent-summary extraction (alchemist#36)                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_agent_summary_returns_tail(tmp_path: Path):
+    from alchemist.runner import _extract_agent_summary
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text(
+        "Lots of tool-call noise here.\n" * 50
+        + "I read the README, found the typo, fixed it on line 12.\n"
+    )
+    summary = _extract_agent_summary(transcript, max_chars=200)
+    assert summary is not None
+    assert "found the typo" in summary
+
+
+def test_extract_agent_summary_handles_missing_file(tmp_path: Path):
+    from alchemist.runner import _extract_agent_summary
+    summary = _extract_agent_summary(tmp_path / "nonexistent.log")
+    assert summary is None
+
+
+def test_extract_agent_summary_returns_none_for_whitespace_only(tmp_path: Path):
+    from alchemist.runner import _extract_agent_summary
+    transcript = tmp_path / "blank.log"
+    transcript.write_text("   \n\n\n   ")
+    summary = _extract_agent_summary(transcript)
+    assert summary is None
+
+
+def test_extract_agent_summary_caps_to_max_chars(tmp_path: Path):
+    from alchemist.runner import _extract_agent_summary
+    transcript = tmp_path / "long.log"
+    transcript.write_text("x" * 5000)
+    summary = _extract_agent_summary(transcript, max_chars=500)
+    assert summary is not None
+    assert len(summary) <= 500
