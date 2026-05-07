@@ -82,8 +82,11 @@ Three transitions, each manual. The tool never auto-graduates.
    Verify cron tick + log output. No side effects.
 2. **Dogfood B** — `dry_run=false`, label still `alchemist-test`. File one tiny
    test issue. Real PR opens. Inspect and merge or reject.
-3. **Live** — flip `dispatch_label` to `alchemist-dispatch`. `max_per_tick=1` for
-   one week, then lift the cap.
+3. **Live** — flip `dispatch_label` to `alchemist-dispatch`. `max_concurrent_repos=1`
+   for one week, then lift to 3 to enable cross-repo swarm.
+
+Full operator walkthrough including Railway provisioning, common failure modes,
+and tuning knobs lives at [`docs/operator-runbook.md`](docs/operator-runbook.md).
 
 ## Falsification
 
