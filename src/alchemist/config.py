@@ -63,7 +63,13 @@ _DEFAULTS: dict[str, object] = {
     "max_per_repo_per_tick": 1,
     "max_concurrent_repos": 1,
     "conductor_timeout_sec": 600,
-    "review_timeout_sec": 300,
+    # 15 minutes for touchstone's merge-pr.sh — it runs the AI code review
+    # (which itself can take 1-3 min for substantive diffs) plus the squash-
+    # merge + cleanup. Empirically, 300s sometimes timed out *after* the
+    # merge succeeded, leading alchemist to report merged=False when the
+    # actual outcome was a clean merge. See alchemist#22 for the post-
+    # timeout state-recheck improvement.
+    "review_timeout_sec": 900,
     "github_token_env": "GITHUB_TOKEN",
 }
 
