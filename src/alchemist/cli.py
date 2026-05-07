@@ -125,14 +125,40 @@ def scan_cmd(as_json: bool) -> None:
 
 
 @main.command(name="run-once")
-def run_once() -> None:
-    """Process one tick. NOT YET IMPLEMENTED — ships in v0.1."""
-    click.echo(
-        "ERROR: `alchemist run-once` ships in v0.1. "
-        "v0.0.x exposes scan + doctor only.",
-        err=True,
-    )
-    sys.exit(2)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human text.")
+def run_once(as_json: bool) -> None:
+    """Process one tick: scan, fan out across repos, dispatch, review, open PRs."""
+    from dataclasses import asdict
+
+    from alchemist.banner import SUBTITLE_TAGLINE
+    from alchemist.runner import run_tick
+
+    config = load_config()
+    if not as_json:
+        print_banner(subtitle=f"tick · {SUBTITLE_TAGLINE}", version=__version__)
+
+    results = run_tick(config)
+
+    if as_json:
+        click.echo(json.dumps([asdict(r) for r in results], default=str, indent=2))
+    else:
+        if not results:
+            click.echo("  (no work this tick)")
+        for r in results:
+            mark = "✗" if r.error else "✓"
+            tag = "[DRY-RUN]" if r.dry_run else "[LIVE]"
+            line = f"  {mark} {tag} {r.repo}#{r.issue_number}"
+            if r.pr_url:
+                line += f"  → {r.pr_url}"
+            elif r.review_verdict:
+                line += f"  review={r.review_verdict}"
+            elif r.error:
+                line += f"  error={r.error}"
+            line += f"  ({r.elapsed_sec:.1f}s)"
+            click.echo(line)
+
+    fatal = [r for r in results if r.error and not r.error.startswith("lock-busy")]
+    sys.exit(1 if fatal else 0)
 
 
 if __name__ == "__main__":  # pragma: no cover
