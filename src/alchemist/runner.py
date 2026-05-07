@@ -466,15 +466,34 @@ def _default_branch(repo: str) -> str:
     return branch
 
 
+def _git_auth_prefix(token: str) -> list[str]:
+    """Return a `git -c http.extraheader=...` prefix that authenticates without
+    embedding the token in URLs.
+
+    URL-embedded auth (`https://x-access-token:<token>@github.com/...`) leaks
+    the token into:
+      - git's stdout/stderr on clone, fetch, and `push --set-upstream`
+        (which Railway captures into deployment logs)
+      - the cloned repo's `.git/config` (where set-url persists it)
+      - any error message that includes the URL
+    With `http.extraheader`, the auth ride-alongs only the in-process git
+    invocation. The token never appears in stored config or printed URLs.
+    """
+    return ["git", "-c", f"http.extraheader=Authorization: Bearer {token}"]
+
+
 def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> None:
-    url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    url = f"https://github.com/{repo}.git"  # plain URL — auth via header
+    git_auth = _git_auth_prefix(token)
     if dest.exists() and (dest / ".git").exists():
+        # Ensure the remote URL on disk is the plain (no-creds) form. If a
+        # previous version of alchemist set it with creds, rewrite it.
         subprocess.run(  # noqa: S603,S607
             ["git", "remote", "set-url", "origin", url],
             cwd=dest, check=True, timeout=30,
         )
         subprocess.run(  # noqa: S603,S607
-            ["git", "fetch", "origin", default_branch, "--depth", "50"],
+            [*git_auth, "fetch", "origin", default_branch, "--depth", "50"],
             cwd=dest, check=True, timeout=120,
         )
         subprocess.run(  # noqa: S603,S607
@@ -491,7 +510,7 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(  # noqa: S603,S607
-        ["git", "clone", "--depth", "50", "--branch", default_branch, url, str(dest)],
+        [*git_auth, "clone", "--depth", "50", "--branch", default_branch, url, str(dest)],
         check=True, timeout=300,
     )
 
@@ -646,9 +665,12 @@ def _check_pr_merged(repo: str, pr_number: int) -> bool:
 
 
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
-    url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    # Use 'origin' (set to a plain URL by _clone_or_update) plus the auth
+    # header — never embed the token in the URL. See _git_auth_prefix.
+    _ = repo  # unused; origin already points at the right remote
+    git_auth = _git_auth_prefix(token)
     subprocess.run(  # noqa: S603,S607
-        ["git", "push", "--set-upstream", url, branch],
+        [*git_auth, "push", "--set-upstream", "origin", branch],
         cwd=repo_dir, check=True, timeout=120,
     )
 
