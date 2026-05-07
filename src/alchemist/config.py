@@ -38,6 +38,7 @@ class Config:
     conductor_timeout_sec: int
     review_timeout_sec: int
     github_token_env: str
+    assignee_user: str  # GitHub username/login to assign to claimed issues
 
     @property
     def github_token(self) -> str | None:
@@ -71,6 +72,8 @@ _DEFAULTS: dict[str, object] = {
     # timeout state-recheck improvement.
     "review_timeout_sec": 900,
     "github_token_env": "GITHUB_TOKEN",
+    # PAT owner for v0.1; swap to autumn-alchemist[bot] in v0.2 (alchemist#6).
+    "assignee_user": "@me",
 }
 
 
@@ -136,6 +139,7 @@ def load_config() -> Config:
         "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
         "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
+        "ALCHEMIST_ASSIGNEE": "assignee_user",
     }
     for env_name, key in env_overrides.items():
         if env_name in os.environ:
@@ -154,4 +158,5 @@ def load_config() -> Config:
         conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
         review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
         github_token_env=str(merged["github_token_env"]),
+        assignee_user=str(merged["assignee_user"]),
     )

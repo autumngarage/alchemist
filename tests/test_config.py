@@ -89,6 +89,7 @@ def test_config_is_frozen():
         conductor_timeout_sec=600,
         review_timeout_sec=300,
         github_token_env="GITHUB_TOKEN",
+        assignee_user="@me",
     )
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):

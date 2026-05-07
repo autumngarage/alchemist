@@ -204,6 +204,25 @@ def _process_locked(
     except subprocess.SubprocessError as exc:
         return _bail(repo, issue, started, config, f"branch: {exc}")
 
+    # Claim the issue (alchemist#23): assign + post a "starting work" comment
+    # so the audit trail is visible, not just the -working label transition.
+    # Assignee failure is non-fatal: log + continue. The comment is the backup.
+    if not config.dry_run:
+        try:
+            _set_assignee(repo, issue.number, "add", config.assignee_user, config)
+        except _GhError as exc:
+            print(
+                f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
+                file=sys.stderr,
+            )
+        _post_activity_comment(
+            repo, issue.number,
+            f"alchemist: claiming this issue\n"
+            f"- branch: `{branch}`\n"
+            f"- provider: `{config.default_provider}`",
+            config,
+        )
+
     brief_path = config.state_dir / "briefs" / f"{repo.replace('/', '-')}-{issue.number}.md"
     brief_path.parent.mkdir(parents=True, exist_ok=True)
     brief_path.write_text(render_brief(issue, repo, work_dir))
@@ -280,6 +299,11 @@ def _process_locked(
             )
 
     if merged:
+        _post_activity_comment(
+            repo, issue.number,
+            f"alchemist: shipped — see {pr_url}",
+            config,
+        )
         with contextlib.suppress(_GhError):
             _set_label(repo, issue.number, _shipped_label(config.dispatch_label), config)
 
@@ -630,14 +654,63 @@ def _make_pr(
     return url, int(match.group(1))
 
 
-def _post_error_comment(repo: str, issue_number: int, message: str) -> None:
+def _post_activity_comment(
+    repo: str, issue_number: int, body: str, config: Config,
+) -> None:
+    """Post a comment on the issue describing alchemist's activity.
+
+    Best-effort: failures (gh missing, timeout, non-zero exit) don't fail the
+    run — the comment is a visibility aid, not a load-bearing primitive.
+    Skipped in dry-run.
+    """
+    if config.dry_run:
+        return
     cmd = [
         "gh", "issue", "comment", str(issue_number),
         "--repo", repo,
-        "--body", f"alchemist: {message}",
+        "--body", body,
     ]
     with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)  # noqa: S603
+        subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=30, check=False,
+        )
+
+
+def _post_error_comment(
+    repo: str, issue_number: int, message: str, config: Config,
+) -> None:
+    """Backwards-compat shim around _post_activity_comment for the bail path."""
+    _post_activity_comment(repo, issue_number, f"alchemist: {message}", config)
+
+
+def _set_assignee(
+    repo: str, issue_number: int, action: str, assignee: str, config: Config,
+) -> None:
+    """Add or remove an assignee. `action` is 'add' or 'remove'.
+
+    Issue claiming (alchemist#23): when alchemist starts work on an issue, it
+    assigns to itself so the audit trail is visible — operators glancing at
+    the issue list see the claim, not just an `-working` label.
+
+    v0.1 (PAT auth): assigns to the PAT owner (e.g. henrymodisett). Visible
+    but not perfectly attributable to the bot.
+    v0.2 (App auth, alchemist#6): swap to autumn-alchemist[bot]. Clean.
+
+    Skipped in dry-run.
+    """
+    if config.dry_run:
+        return
+    flag = "--add-assignee" if action == "add" else "--remove-assignee"
+    cmd = [
+        "gh", "issue", "edit", str(issue_number),
+        "--repo", repo,
+        flag, assignee,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # noqa: S603
+    if result.returncode != 0:
+        raise _GhError(
+            result.stderr.strip() or f"gh issue edit assignee {action} exit {result.returncode}"
+        )
 
 
 def _bail(
@@ -645,7 +718,7 @@ def _bail(
 ) -> RunResult:
     """Common error path: post a comment, transition to error label, return result."""
     if not config.dry_run:
-        _post_error_comment(repo, issue.number, message)
+        _post_error_comment(repo, issue.number, message, config)
         with contextlib.suppress(_GhError):
             _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
     return _result(repo, issue.number, started, config, error=message)
