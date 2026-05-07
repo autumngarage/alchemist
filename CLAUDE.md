@@ -4,12 +4,27 @@
 
 Alchemist is the fifth tool in the Autumn Garage family — the **transmuter**.
 It watches one GitHub org for issues labelled `alchemist-dispatch`, dispatches
-each one to Conductor's agentic loop on a fresh feature branch, runs
-Touchstone's review gate over the resulting diff, and opens a PR.
+each one to Conductor's agentic loop on a fresh feature branch, opens a PR,
+and hands it to Touchstone's `merge-pr.sh` which runs the AI code-review gate
+and squash-merges on a CLEAN verdict.
 
-A human merges (or rejects). Alchemist never merges autonomously, never iterates
-with the reviewer, and never speaks to an LLM directly — every model call goes
-through Conductor, every quality judgment goes through Touchstone.
+The full data flow:
+
+```
+issue created
+  → alchemist detects (gh search across the org)
+  → conductor agent evaluates scope (read code / web search / just go)
+  → conductor agent does the work (edits in a per-issue working dir)
+  → alchemist commits + pushes (signed as `Alchemist <alchemist@autumngarage.dev>`)
+  → alchemist opens PR (title prefixed `[alchemist]` for audit visibility)
+  → touchstone merge-pr.sh runs review + squash-merges if CLEAN
+  → BLOCKED reviews leave the PR open with comments for human triage
+```
+
+Alchemist never speaks to an LLM directly (every model call goes through
+Conductor) and never makes a quality judgment (every review goes through
+Touchstone's `merge-pr.sh`). It is purely the orchestrator of those two
+peers plus the GitHub I/O around them.
 
 ## Composition rules (Doctrine 0001 / 0003 / 0004)
 
@@ -17,10 +32,14 @@ Alchemist composes by file/CLI contract, never by code import. The Python code
 in this repo is *only* orchestration. Everything load-bearing happens via
 subprocess:
 
-- `gh search issues / gh issue list / gh pr create / gh issue edit` — GitHub I/O
+- `gh search issues / gh issue edit / gh pr create / gh repo view` — GitHub I/O
 - `git clone / checkout / commit / push` — branch state
 - `conductor exec --with <provider> --tools Read,Edit,Write,Bash --brief-file <path>` — agentic fix loop
-- `<touchstone>/scripts/codex-review.sh` (invoked from the cloned repo's root) — review gate
+- `bash <touchstone>/scripts/merge-pr.sh <pr-number>` (from the cloned repo's root) — review-and-merge gate
+
+Alchemist does NOT run `touchstone codex-review.sh` directly. `merge-pr.sh`
+calls it internally as the merge gate; the result is a clean review-and-merge
+in one step.
 
 If any external CLI is missing, alchemist fails fast with a structured error.
 No fallbacks, no shims, no silent degradation.

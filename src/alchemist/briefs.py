@@ -45,23 +45,17 @@ def render_brief(issue: DispatchIssue, repo: str) -> str:
     return _env().from_string(src).render(issue=issue, repo=repo)
 
 
-def render_pr_body(
-    *,
-    issue: DispatchIssue,
-    review_verdict: str,
-    review_summary: str | None,
-    cost_summary: str | None,
-    provider: str,
-    dry_run: bool,
-) -> str:
-    """Render the PR body markdown for `gh pr create --body <...>`."""
+def render_pr_body(*, issue: DispatchIssue, provider: str) -> str:
+    """Render the PR body markdown for `gh pr create --body <...>`.
+
+    The PR body is intentionally minimal: a link to the source issue and an
+    Alchemist attribution footer. The review-and-merge gate runs *after* the
+    PR opens (Touchstone's `merge-pr.sh`); review findings show up as PR
+    comments rather than embedded in the body.
+    """
     src = _load_template_source("pr_body.md.j2")
     return _env().from_string(src).render(
         issue=issue,
-        review_verdict=review_verdict,
-        review_summary=review_summary,
-        cost_summary=cost_summary,
         provider=provider,
         brief_version=BRIEF_TEMPLATE_VERSION,
-        branch_kind="dry-run" if dry_run else "live",
     )

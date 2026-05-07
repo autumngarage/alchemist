@@ -4,13 +4,17 @@ Issue-driven transmuter for the [Autumn Garage](https://github.com/autumngarage)
 
 A user files a GitHub issue and labels it `alchemist-dispatch`. Within ~5 minutes, Alchemist
 sees the label, dispatches the issue to [Conductor](https://github.com/autumngarage/conductor)'s
-agentic loop on a fresh feature branch, runs [Touchstone](https://github.com/autumngarage/touchstone)'s
-review gate over the resulting diff, and opens a PR with the fix and the review summary in the body.
+agentic loop on a fresh feature branch, opens a PR, and hands it to
+[Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` which runs the AI
+code-review gate and squash-merges on a CLEAN verdict. BLOCKED reviews leave the PR open
+with comments for human triage.
 
-A human merges (or rejects). Alchemist never merges autonomously, never iterates with the reviewer,
-and never speaks to an LLM directly — every model call goes through Conductor, every quality
-judgment goes through Touchstone. Alchemist is the messenger between GitHub and the rest of the
-garage.
+Alchemist never speaks to an LLM directly (every model call goes through Conductor) and
+never makes a quality judgment (Touchstone owns review-and-merge). It is purely the
+orchestrator: GitHub I/O, git plumbing, and per-repo locking around its two peers.
+
+Every commit and PR is signed `Alchemist <alchemist@autumngarage.dev>` with a `[alchemist]`
+title prefix so the audit trail in `git log` and PR lists is unambiguous.
 
 ## Status
 

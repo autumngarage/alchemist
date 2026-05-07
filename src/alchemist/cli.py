@@ -151,9 +151,8 @@ def run_once(as_json: bool) -> None:
             tag = "[DRY-RUN]" if r.dry_run else "[LIVE]"
             line = f"  {mark} {tag} {r.repo}#{r.issue_number}"
             if r.pr_url:
-                line += f"  → {r.pr_url}"
-            elif r.review_verdict:
-                line += f"  review={r.review_verdict}"
+                merge_tag = "merged" if r.merged else "open" if r.merged is False else "?"
+                line += f"  → {r.pr_url}  [{merge_tag}]"
             elif r.error:
                 line += f"  error={r.error}"
             line += f"  ({r.elapsed_sec:.1f}s)"

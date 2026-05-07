@@ -1,19 +1,20 @@
 """The transmute loop — one tick of `alchemist run-once`.
 
 End-to-end:
-    scan → for each issue (capped at max_per_tick):
-        lock → label working → clone → brief → conductor → review →
-        push → PR → label shipped → unlock
+    scan → group by repo → fan out (per-repo lock) → for each issue:
+        clone → render brief → conductor exec → push → open PR →
+        delegate to touchstone's `merge-pr.sh` (review-and-merge gate)
 
 Composition is by subprocess, never by code import (Doctrine 0001/0003/0004).
-Every external call has an explicit `timeout=` and propagates structured
-errors via `RunResult.error`. No retries inside alchemist — the dispatch
-label *is* the retry contract.
+Alchemist owns NONE of:
+- The agent's decision-making about how to fix the issue (Conductor + the brief).
+- The review-and-merge gate (Touchstone's `merge-pr.sh`).
 
-Dry-run rules: when `config.dry_run=True`, every read-side operation runs
-(scan, lock, clone, brief, conductor, review) but every mutation is
-skipped (label transitions, git push, gh pr create). The intent is to
-prove the pipeline against test issues without touching real PR state.
+Alchemist owns ONLY:
+- GitHub I/O (issue scan, label transitions, PR open).
+- Git plumbing (clone, branch, commit, push).
+- Per-repo lock + cross-repo fan-out.
+- Hand-offs between the above.
 """
 
 from __future__ import annotations
@@ -40,12 +41,21 @@ if TYPE_CHECKING:
     from alchemist.config import Config
 
 
+# Audit signing — every git commit + PR title surfaces alchemist clearly.
+# v0.1 uses these directly (PAT-based GITHUB_TOKEN authoring).
+# v0.2 (alchemist#6) swaps to GitHub App installation tokens; commits authored
+# via the App will additionally show as the App's bot user in the GitHub UI.
+_GIT_AUTHOR_NAME = "Alchemist"
+_GIT_AUTHOR_EMAIL = "alchemist@autumngarage.dev"
+_PR_TITLE_PREFIX = "[alchemist]"
+
+
 @dataclass(frozen=True)
 class RunResult:
     repo: str
     issue_number: int
     pr_url: str | None
-    review_verdict: str | None  # "CLEAN" | "FIXED" | "BLOCKED" | None on dry-run/error
+    merged: bool | None      # True/False after merge-pr.sh ran; None on dry-run/no-PR
     error: str | None
     elapsed_sec: float
     dry_run: bool
@@ -111,14 +121,12 @@ def _process_repo(
         with acquire(config.state_dir, repo, holder_note=note):
             return [_process_issue(issue, config) for issue in issues]
     except LockBusyError as exc:
-        # Another worker (different tick, or different thread) holds the
-        # repo. Skip — next tick will pick these up.
         return [
             RunResult(
                 repo=repo,
                 issue_number=i.number,
                 pr_url=None,
-                review_verdict=None,
+                merged=None,
                 error=f"lock-busy: {exc}",
                 elapsed_sec=0.0,
                 dry_run=config.dry_run,
@@ -136,7 +144,7 @@ def _process_issue(issue: DispatchIssue, config: Config) -> RunResult:
             repo=issue.repository,
             issue_number=issue.number,
             pr_url=None,
-            review_verdict=None,
+            merged=None,
             error=f"unhandled: {exc}",
             elapsed_sec=time.monotonic() - started,
             dry_run=config.dry_run,
@@ -158,7 +166,7 @@ def _process_locked(
             return _result(repo, issue.number, started, config, error=f"label-transition: {exc}")
 
     try:
-        default_branch = _default_branch(repo, config)
+        default_branch = _default_branch(repo)
     except _GhError as exc:
         return _bail(repo, issue, started, config, f"default-branch: {exc}")
 
@@ -184,7 +192,7 @@ def _process_locked(
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        cost_summary = _run_conductor(
+        _run_conductor(
             brief_path=brief_path,
             cwd=work_dir,
             provider=config.default_provider,
@@ -203,27 +211,18 @@ def _process_locked(
             "conductor produced no diff",
         )
 
-    if not config.dry_run:
-        try:
-            _stage_and_commit(work_dir, f"alchemist: {issue.title}")
-        except subprocess.SubprocessError as exc:
-            return _bail(repo, issue, started, config, f"commit: {exc}")
-
-    try:
-        verdict, summary = _run_review(work_dir, default_branch, config.review_timeout_sec)
-    except _ToolError as exc:
-        return _bail(repo, issue, started, config, f"review: {exc}")
-
     if config.dry_run:
         msg = (
-            f"[DRY-RUN] {repo}#{issue.number}: review={verdict}; "
-            f"would push branch {branch} and open PR"
+            f"[DRY-RUN] {repo}#{issue.number}: would commit, push branch "
+            f"{branch}, open PR, and call merge-pr.sh"
         )
         print(msg, file=sys.stderr)
-        return _result(
-            repo, issue.number, started, config,
-            review_verdict=verdict,
-        )
+        return _result(repo, issue.number, started, config)
+
+    try:
+        _stage_and_commit(work_dir, f"alchemist: {issue.title}")
+    except subprocess.SubprocessError as exc:
+        return _bail(repo, issue, started, config, f"commit: {exc}")
 
     try:
         _push_branch(work_dir, branch, repo, token)
@@ -232,28 +231,35 @@ def _process_locked(
 
     body = render_pr_body(
         issue=issue,
-        review_verdict=verdict,
-        review_summary=summary,
-        cost_summary=cost_summary,
         provider=config.default_provider,
-        dry_run=False,
     )
-    pr_title = f"fix: {issue.title} (#{issue.number})"
+    pr_title = f"{_PR_TITLE_PREFIX} fix: {issue.title} (#{issue.number})"
     try:
-        pr_url = _make_pr(repo, default_branch, branch, pr_title, body, token)
+        pr_url, pr_number = _make_pr(repo, default_branch, branch, pr_title, body)
     except _GhError as exc:
         return _bail(repo, issue, started, config, f"pr-create: {exc}")
 
+    # Touchstone owns the review-and-merge gate. Alchemist hands off the PR
+    # number and waits for the result. CLEAN review → squash-merged. BLOCKED
+    # review → PR stays open with review comments; needs human triage.
     try:
-        _set_label(repo, issue.number, _shipped_label(config.dispatch_label), config)
-    except _GhError as exc:
-        # PR is already open; tag the failure to transition labels but keep success
-        print(f"alchemist: warning — label transition to shipped failed: {exc}", file=sys.stderr)
+        merged = _run_merge_pr(work_dir, pr_number, config.review_timeout_sec)
+    except _ToolError as exc:
+        # Couldn't even run merge-pr.sh (script missing, hard timeout, etc.).
+        # The PR is open; surface this as a non-fatal status — the review can
+        # still happen via touchstone's pre-push hook on a manual rebase.
+        return _result(
+            repo, issue.number, started, config,
+            pr_url=pr_url, merged=False, error=f"merge-pr: {exc}",
+        )
+
+    if merged:
+        with contextlib.suppress(_GhError):
+            _set_label(repo, issue.number, _shipped_label(config.dispatch_label), config)
 
     return _result(
         repo, issue.number, started, config,
-        pr_url=pr_url,
-        review_verdict=verdict,
+        pr_url=pr_url, merged=merged,
     )
 
 
@@ -313,7 +319,7 @@ def _set_label(repo: str, issue_number: int, transition: tuple[str, str], config
         raise _GhError(result.stderr.strip() or f"gh issue edit exit {result.returncode}")
 
 
-def _default_branch(repo: str, config: Config) -> str:  # noqa: ARG001 — config retained for future use
+def _default_branch(repo: str) -> str:
     cmd = [
         "gh", "repo", "view", repo,
         "--json", "defaultBranchRef",
@@ -372,8 +378,8 @@ def _run_conductor(
     provider: str,
     timeout: int,
     transcript_path: Path,
-) -> str | None:
-    """Run conductor exec; return the cost-summary tail or None.
+) -> None:
+    """Run conductor exec; on success, conductor's edits are present in cwd.
 
     Stdout is streamed to the transcript file so an operator can `cat` it
     after the fact. Conductor's own --timeout flag is set in addition to
@@ -402,13 +408,6 @@ def _run_conductor(
     if result.returncode != 0:
         raise _ToolError(f"exit {result.returncode}; see {transcript_path}")
 
-    try:
-        tail = transcript_path.read_text().splitlines()
-    except OSError:
-        return None
-    cost_lines = [line for line in tail if "cost" in line.lower() or "$" in line]
-    return "\n".join(cost_lines[-5:]) if cost_lines else None
-
 
 def _has_changes(repo_dir: Path) -> bool:
     result = subprocess.run(  # noqa: S603,S607
@@ -419,24 +418,32 @@ def _has_changes(repo_dir: Path) -> bool:
 
 
 def _stage_and_commit(repo_dir: Path, message: str) -> None:
+    """Stage all changes and commit, signing as Alchemist for audit visibility."""
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": _GIT_AUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": _GIT_AUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": _GIT_AUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": _GIT_AUTHOR_EMAIL,
+    }
     subprocess.run(  # noqa: S603,S607
         ["git", "add", "-A"],
-        cwd=repo_dir, check=True, timeout=30,
+        cwd=repo_dir, env=git_env, check=True, timeout=30,
     )
     subprocess.run(  # noqa: S603,S607
         ["git", "commit", "-m", message],
-        cwd=repo_dir, check=True, timeout=30,
+        cwd=repo_dir, env=git_env, check=True, timeout=30,
     )
 
 
 def _resolve_touchstone_root() -> Path:
-    """Locate the touchstone install (the repo, not the bin shim)."""
+    """Locate the touchstone install (the dir containing scripts/merge-pr.sh)."""
     env_root = os.environ.get("TOUCHSTONE_ROOT")
     if env_root:
         candidate = Path(env_root)
-        if (candidate / "scripts" / "codex-review.sh").exists():
+        if (candidate / "scripts" / "merge-pr.sh").exists():
             return candidate
-        if (candidate / "libexec" / "scripts" / "codex-review.sh").exists():
+        if (candidate / "libexec" / "scripts" / "merge-pr.sh").exists():
             return candidate / "libexec"
 
     try:
@@ -446,54 +453,43 @@ def _resolve_touchstone_root() -> Path:
         )
         if result.returncode == 0:
             brew_root = Path(result.stdout.strip())
-            if (brew_root / "libexec" / "scripts" / "codex-review.sh").exists():
+            if (brew_root / "libexec" / "scripts" / "merge-pr.sh").exists():
                 return brew_root / "libexec"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
     for fallback in (Path("/opt/touchstone"), Path("/opt/touchstone/libexec")):
-        if (fallback / "scripts" / "codex-review.sh").exists():
+        if (fallback / "scripts" / "merge-pr.sh").exists():
             return fallback
-    raise _ToolError("touchstone codex-review.sh not found")
+    raise _ToolError("touchstone scripts/merge-pr.sh not found")
 
 
-def _run_review(
-    repo_dir: Path, base_branch: str, timeout: int
-) -> tuple[str, str | None]:
-    """Run touchstone codex-review.sh; return (verdict, summary).
+def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> bool:
+    """Hand the PR to touchstone's merge-pr.sh (review + auto-merge gate).
 
-    Verdicts: 'CLEAN' (zero exit), 'FIXED' (script auto-committed), 'BLOCKED'.
-    Touchstone exits 0 on CLEAN and FIXED, non-zero on BLOCKED.
+    Returns:
+        True  — touchstone reviewed CLEAN/FIXED and squash-merged the PR.
+        False — touchstone review BLOCKED or merge otherwise failed; PR stays
+                open with review comments for human triage.
+
+    Raises:
+        _ToolError — couldn't locate or invoke merge-pr.sh at all.
     """
     root = _resolve_touchstone_root()
-    script = root / "scripts" / "codex-review.sh"
-    env = {**os.environ, "TOUCHSTONE_REVIEW_BASE_REF": base_branch}
+    script = root / "scripts" / "merge-pr.sh"
     try:
         result = subprocess.run(  # noqa: S603
-            ["bash", str(script)],
+            ["bash", str(script), str(pr_number)],
             cwd=repo_dir,
-            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise _ToolError(f"review timeout after {timeout}s") from exc
+        raise _ToolError(f"merge-pr.sh timeout after {timeout}s") from exc
 
-    output = (result.stdout or "") + (result.stderr or "")
-    if "CODEX_REVIEW_BLOCKED" in output or result.returncode != 0:
-        return "BLOCKED", _trim_review_output(output)
-    if "CODEX_REVIEW_FIXED" in output:
-        return "FIXED", _trim_review_output(output)
-    return "CLEAN", _trim_review_output(output)
-
-
-def _trim_review_output(text: str, max_lines: int = 60) -> str | None:
-    lines = text.splitlines()
-    if not lines:
-        return None
-    return "\n".join(lines[-max_lines:])
+    return result.returncode == 0
 
 
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
@@ -505,8 +501,9 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
 
 
 def _make_pr(
-    repo: str, base: str, head: str, title: str, body: str, token: str  # noqa: ARG001 — token reserved for future direct API use
-) -> str:
+    repo: str, base: str, head: str, title: str, body: str
+) -> tuple[str, int]:
+    """Open a PR; return (url, number)."""
     cmd = [
         "gh", "pr", "create",
         "--repo", repo,
@@ -519,7 +516,11 @@ def _make_pr(
     if result.returncode != 0:
         raise _GhError(result.stderr.strip() or f"gh pr create exit {result.returncode}")
     url = result.stdout.strip().splitlines()[-1]
-    return url
+    # The URL ends in /pull/<N>; pull the number out so we can hand it to merge-pr.sh.
+    match = re.search(r"/pull/(\d+)", url)
+    if not match:
+        raise _GhError(f"could not parse PR number from gh output: {url!r}")
+    return url, int(match.group(1))
 
 
 def _post_error_comment(repo: str, issue_number: int, message: str) -> None:
@@ -550,14 +551,14 @@ def _result(
     config: Config,
     *,
     pr_url: str | None = None,
-    review_verdict: str | None = None,
+    merged: bool | None = None,
     error: str | None = None,
 ) -> RunResult:
     return RunResult(
         repo=repo,
         issue_number=issue_number,
         pr_url=pr_url,
-        review_verdict=review_verdict,
+        merged=merged,
         error=error,
         elapsed_sec=time.monotonic() - started,
         dry_run=config.dry_run,

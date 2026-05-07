@@ -54,7 +54,7 @@ def _stub_all_external(
     *,
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
-    review_verdict: str = "CLEAN",
+    merge_outcome: str = "merged",   # "merged" | "blocked" | "missing"
 ):
     """Patch every subprocess.* + scanner + doctor used by the runner.
 
@@ -95,7 +95,7 @@ def _stub_all_external(
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=0,
-                stdout="https://github.com/fake/pr/1\n",
+                stdout="https://github.com/autumngarage/touchstone/pull/9001\n",
                 stderr="",
             )
 
@@ -114,10 +114,9 @@ def _stub_all_external(
                 return subprocess.CompletedProcess(args=cmd, returncode=2, stdout="", stderr="boom")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-        if "bash" in cmd and any("codex-review.sh" in str(c) for c in cmd):
-            stdout = f"CODEX_REVIEW_{review_verdict}\n"
-            rc = 0 if review_verdict in ("CLEAN", "FIXED") else 1
-            return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout=stdout, stderr="")
+        if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
+            rc = 0 if merge_outcome == "merged" else 1
+            return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout="", stderr="")
 
         # Everything else (git clone/checkout/fetch/reset/clean/add/commit, brew prefix)
         return subprocess.CompletedProcess(
@@ -125,10 +124,16 @@ def _stub_all_external(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "alchemist.runner._resolve_touchstone_root",
-        lambda: Path("/opt/homebrew/opt/touchstone/libexec"),
-    )
+    if merge_outcome == "missing":
+        def fake_resolve():
+            from alchemist.runner import _ToolError
+            raise _ToolError("touchstone scripts/merge-pr.sh not found")
+        monkeypatch.setattr("alchemist.runner._resolve_touchstone_root", fake_resolve)
+    else:
+        monkeypatch.setattr(
+            "alchemist.runner._resolve_touchstone_root",
+            lambda: Path("/opt/homebrew/opt/touchstone/libexec"),
+        )
     return captured
 
 
@@ -142,8 +147,8 @@ def test_dry_run_happy_path_skips_push_and_pr(monkeypatch: pytest.MonkeyPatch, t
     r = results[0]
     assert r.repo == "autumngarage/touchstone"
     assert r.error is None
-    assert r.review_verdict == "CLEAN"
     assert r.pr_url is None
+    assert r.merged is None
     assert r.dry_run is True
     assert captured["push_calls"] == []
     assert captured["pr_creates"] == []
@@ -159,12 +164,16 @@ def test_live_happy_path_pushes_and_opens_pr(monkeypatch: pytest.MonkeyPatch, tm
     assert len(results) == 1
     r = results[0]
     assert r.error is None
-    assert r.pr_url == "https://github.com/fake/pr/1"
-    assert r.review_verdict == "CLEAN"
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is True
     assert len(captured["push_calls"]) == 1
     assert len(captured["pr_creates"]) == 1
     # working transition + shipped transition
     assert len(captured["label_transitions"]) == 2
+    # Verify the PR title carries the [alchemist] audit prefix.
+    pr_create = captured["pr_creates"][0]
+    title_idx = pr_create.index("--title") + 1
+    assert pr_create[title_idx].startswith("[alchemist]")
 
 
 def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -180,18 +189,37 @@ def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert captured["pr_creates"] == []
 
 
-def test_review_blocked_still_opens_pr_with_verdict(
+def test_merge_blocked_leaves_pr_open_for_human_triage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    captured = _stub_all_external(monkeypatch, review_verdict="BLOCKED")
+    captured = _stub_all_external(monkeypatch, merge_outcome="blocked")
     config = _config(tmp_path, dry_run=False)
 
     results = run_tick(config)
 
     assert len(results) == 1
     r = results[0]
-    assert r.review_verdict == "BLOCKED"
-    assert r.pr_url == "https://github.com/fake/pr/1"
+    assert r.error is None
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is False  # touchstone blocked the merge; PR stays open
+    assert len(captured["pr_creates"]) == 1
+
+
+def test_merge_pr_script_missing_records_nonfatal_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Touchstone install missing → PR is open but merge-pr.sh couldn't run.
+    Surface this as an error string but keep pr_url so a human can pick up."""
+    captured = _stub_all_external(monkeypatch, merge_outcome="missing")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is False
+    assert r.error is not None and "merge-pr" in r.error
     assert len(captured["pr_creates"]) == 1
 
 
@@ -241,7 +269,7 @@ def test_run_result_is_frozen():
         repo="x/y",
         issue_number=1,
         pr_url=None,
-        review_verdict=None,
+        merged=None,
         error=None,
         elapsed_sec=0.0,
         dry_run=True,
