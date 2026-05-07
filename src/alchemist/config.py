@@ -39,6 +39,7 @@ class Config:
     review_timeout_sec: int
     github_token_env: str
     assignee_user: str  # GitHub username/login to assign to claimed issues
+    repo_blocklist: tuple[str, ...]  # repos in the org to skip even if labelled
 
     @property
     def github_token(self) -> str | None:
@@ -74,6 +75,12 @@ _DEFAULTS: dict[str, object] = {
     "github_token_env": "GITHUB_TOKEN",
     # PAT owner for v0.1; swap to autumn-alchemist[bot] in v0.2 (alchemist#6).
     "assignee_user": "@me",
+    # Comma-separated repo names ("owner/name" or just "name" within the
+    # configured org) to skip even when labelled. For repos that need local
+    # testing, customer-sensitive repos, or anything else alchemist shouldn't
+    # touch. Stored as a tuple in the resolved Config; the env-var override
+    # is comma-separated.
+    "repo_blocklist": "",
 }
 
 
@@ -89,6 +96,27 @@ def _coerce_int(raw: object) -> int:
     if isinstance(raw, int):
         return raw
     return int(str(raw).strip())
+
+
+def _coerce_repo_blocklist(raw: object, org: str) -> tuple[str, ...]:
+    """Normalize a TOML list or comma-separated env-var into a tuple of
+    fully-qualified `owner/name` strings.
+
+    Bare repo names (no slash) are interpreted as `<org>/<name>` so the
+    config keeps working when the operator types just `vesper` instead of
+    `autumngarage/vesper`.
+    """
+    if isinstance(raw, (list, tuple)):
+        names = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        names = [
+            piece.strip() for piece in str(raw).split(",") if piece.strip()
+        ]
+    qualified = tuple(
+        name if "/" in name else f"{org}/{name}"
+        for name in names
+    )
+    return qualified
 
 
 def _config_path() -> Path | None:
@@ -140,6 +168,7 @@ def load_config() -> Config:
         "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
         "ALCHEMIST_ASSIGNEE": "assignee_user",
+        "ALCHEMIST_REPO_BLOCKLIST": "repo_blocklist",
     }
     for env_name, key in env_overrides.items():
         if env_name in os.environ:
@@ -159,4 +188,7 @@ def load_config() -> Config:
         review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
         github_token_env=str(merged["github_token_env"]),
         assignee_user=str(merged["assignee_user"]),
+        repo_blocklist=_coerce_repo_blocklist(
+            merged["repo_blocklist"], str(merged["org"])
+        ),
     )

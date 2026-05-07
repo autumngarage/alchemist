@@ -14,7 +14,13 @@ from alchemist.runner import RunResult, run_tick
 from alchemist.scanner import DispatchIssue
 
 
-def _config(state_dir: Path, *, dry_run: bool = True, max_concurrent: int = 1) -> Config:
+def _config(
+    state_dir: Path,
+    *,
+    dry_run: bool = True,
+    max_concurrent: int = 1,
+    repo_blocklist: tuple[str, ...] = (),
+) -> Config:
     return Config(
         org="autumngarage",
         dispatch_label="alchemist-test",
@@ -29,6 +35,7 @@ def _config(state_dir: Path, *, dry_run: bool = True, max_concurrent: int = 1) -
         review_timeout_sec=60,
         github_token_env="GITHUB_TOKEN",
         assignee_user="@me",
+        repo_blocklist=repo_blocklist,
     )
 
 
@@ -300,6 +307,28 @@ def test_ensure_labels_creates_declined_label(monkeypatch: pytest.MonkeyPatch):
     assert "alchemist-test-declined" in label_names
     # Now five expected labels (added 'declined' to the original four).
     assert len(label_names) == 5
+
+
+def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Repos in the blocklist are filtered out of the tick — labelled issues
+    on those repos are silently skipped, not bailed/declined."""
+    issues = [
+        _issue(num=1, repo="autumngarage/touchstone"),
+        _issue(num=2, repo="autumngarage/vesper"),  # blocklisted
+        _issue(num=3, repo="autumngarage/cortex"),
+    ]
+    _stub_all_external(monkeypatch, issues=issues)
+    config = _config(
+        tmp_path,
+        dry_run=True,
+        repo_blocklist=("autumngarage/vesper",),
+    )
+
+    results = run_tick(config)
+
+    repos_processed = sorted({r.repo for r in results})
+    assert "autumngarage/vesper" not in repos_processed
+    assert repos_processed == ["autumngarage/cortex", "autumngarage/touchstone"]
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

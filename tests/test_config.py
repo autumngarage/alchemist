@@ -27,6 +27,47 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.dry_run is True
     assert cfg.max_per_repo_per_tick == 1
     assert cfg.max_concurrent_repos == 1
+    assert cfg.repo_blocklist == ()
+
+
+def test_repo_blocklist_env_var_comma_separated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_REPO_BLOCKLIST", "vesper,autumngarage/secret,foo/bar")
+    cfg = load_config()
+    # Bare names get qualified with the configured org; already-qualified pass through.
+    assert cfg.repo_blocklist == (
+        "autumngarage/vesper",
+        "autumngarage/secret",
+        "foo/bar",
+    )
+
+
+def test_repo_blocklist_toml_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_file = tmp_path / "alchemist.toml"
+    cfg_file.write_text(
+        """
+[alchemist]
+org = "autumngarage"
+repo_blocklist = ["vesper", "henrymodisett/private"]
+"""
+    )
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(cfg_file))
+    cfg = load_config()
+    assert cfg.repo_blocklist == (
+        "autumngarage/vesper",
+        "henrymodisett/private",
+    )
+
+
+def test_repo_blocklist_empty_string_is_empty_tuple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_REPO_BLOCKLIST", "")
+    cfg = load_config()
+    assert cfg.repo_blocklist == ()
 
 
 def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -90,6 +131,7 @@ def test_config_is_frozen():
         review_timeout_sec=300,
         github_token_env="GITHUB_TOKEN",
         assignee_user="@me",
+        repo_blocklist=(),
     )
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):

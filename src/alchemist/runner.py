@@ -87,6 +87,16 @@ def run_tick(config: Config) -> list[RunResult]:
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
         return []
 
+    if config.repo_blocklist:
+        skipped = [i for i in issues if i.repository in config.repo_blocklist]
+        if skipped:
+            for i in skipped:
+                print(
+                    f"alchemist: skipping {i.repository}#{i.number} (repo in blocklist)",
+                    file=sys.stderr,
+                )
+        issues = [i for i in issues if i.repository not in config.repo_blocklist]
+
     grouped: dict[str, list[DispatchIssue]] = defaultdict(list)
     for issue in issues:
         grouped[issue.repository].append(issue)
