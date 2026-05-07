@@ -23,6 +23,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+# Used when building outside a git checkout (e.g. inside a Docker build that
+# doesn't ship .git history). CI release builds set
+# SETUPTOOLS_SCM_PRETEND_VERSION explicitly so the published image matches the
+# tag.
+fallback-version = "0.0.0+nogit"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/alchemist/_version.py"
