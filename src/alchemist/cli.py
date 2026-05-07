@@ -158,7 +158,7 @@ def run_once(as_json: bool) -> None:
             line += f"  ({r.elapsed_sec:.1f}s)"
             click.echo(line)
 
-    benign_prefixes = ("lock-busy", "conductor produced no diff")
+    benign_prefixes = ("lock-busy", "conductor produced no diff", "stuck-sweep")
     fatal = [
         r for r in results
         if r.error and not any(r.error.startswith(p) for p in benign_prefixes)
