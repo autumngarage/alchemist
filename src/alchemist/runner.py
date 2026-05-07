@@ -49,6 +49,9 @@ _GIT_AUTHOR_NAME = "Alchemist"
 _GIT_AUTHOR_EMAIL = "alchemist@autumngarage.dev"
 _PR_TITLE_PREFIX = "[alchemist]"
 
+# Per-process cache: only ensure a repo+dispatch label set once per process.
+_LABELS_ENSURED: set[tuple[str, str]] = set()
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -115,6 +118,25 @@ def _process_repo(
     behind a per-repo lock."""
     if not issues:
         return []
+
+    if config.dry_run:
+        print(f"[DRY-RUN] would ensure labels on {repo}", file=sys.stderr)
+    else:
+        try:
+            _ensure_labels(repo, config.dispatch_label)
+        except _GhError as exc:
+            return [
+                RunResult(
+                    repo=repo,
+                    issue_number=i.number,
+                    pr_url=None,
+                    merged=None,
+                    error=f"label-ensure: {exc}",
+                    elapsed_sec=0.0,
+                    dry_run=config.dry_run,
+                )
+                for i in issues
+            ]
 
     note = f"{len(issues)} issue(s); first=#{issues[0].number}"
     try:
@@ -302,6 +324,66 @@ def _error_label(dispatch: str) -> tuple[str, str]:
     working = _working_label(dispatch)[1]
     add = dispatch.replace("-dispatch", "-error").replace("-test", "-test-error")
     return working, add
+
+
+_LABEL_PALETTE: tuple[tuple[str, str, str], ...] = (
+    # (suffix-key, color, description). The first row is the bare dispatch
+    # label; the next three are the state-machine successors derived from it.
+    ("base",    "ffd787", "Dispatched to Alchemist for transmutation"),
+    ("working", "fff5d7", "Alchemist actively working"),
+    ("shipped", "d7ffd7", "Alchemist shipped a PR"),
+    ("error",   "ffd7d7", "Alchemist hit an error"),
+)
+
+
+def _expected_labels(dispatch_label: str) -> dict[str, tuple[str, str]]:
+    """Return {label_name: (color, description)} for the four labels alchemist
+    needs on every watched repo."""
+    base = dispatch_label
+    working = _working_label(dispatch_label)[1]
+    shipped = _shipped_label(dispatch_label)[1]
+    error = _error_label(dispatch_label)[1]
+    names = {"base": base, "working": working, "shipped": shipped, "error": error}
+    return {
+        names[key]: (color, desc)
+        for key, color, desc in _LABEL_PALETTE
+    }
+
+
+def _ensure_labels(repo: str, dispatch_label: str) -> None:
+    """Idempotently create alchemist's expected label set on `repo`.
+
+    Removes the manual-setup cliff for new operators (alchemist#19): the four
+    labels alchemist transitions between (`<base>`, `-working`, `-shipped`,
+    `-error`) must exist on the target repo or `gh issue edit --add-label`
+    silently fails and the dispatch label gets stripped without a successor.
+
+    `gh label create --force` is idempotent at the gh level: if the label
+    already exists with the same color/description, it's a no-op; if it
+    differs, gh updates it. Either way alchemist gets to the state it needs.
+    Cached per-process so the cron tick doesn't pay the round-trip every
+    time once the labels are in place.
+    """
+    cache_key = (repo, dispatch_label)
+    if cache_key in _LABELS_ENSURED:
+        return
+
+    for name, (color, desc) in _expected_labels(dispatch_label).items():
+        cmd = [
+            "gh", "label", "create", name,
+            "--repo", repo,
+            "--color", color,
+            "--description", desc,
+            "--force",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # noqa: S603
+        if result.returncode != 0:
+            raise _GhError(
+                f"could not ensure label {name!r} on {repo}: "
+                f"{result.stderr.strip() or f'gh label create exit {result.returncode}'}"
+            )
+
+    _LABELS_ENSURED.add(cache_key)
 
 
 def _set_label(repo: str, issue_number: int, transition: tuple[str, str], config: Config) -> None:

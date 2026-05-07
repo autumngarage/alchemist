@@ -67,6 +67,7 @@ def _stub_all_external(
     captured: dict[str, list[Any]] = {
         "subprocess_run_args": [],
         "label_transitions": [],
+        "label_creates": [],
         "push_calls": [],
         "pr_creates": [],
     }
@@ -79,6 +80,10 @@ def _stub_all_external(
 
     def fake_run(cmd, *args, **kwargs):
         captured["subprocess_run_args"].append(cmd)
+
+        if "label" in cmd and "create" in cmd:
+            captured["label_creates"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "issue" in cmd and "edit" in cmd:
             captured["label_transitions"].append(cmd)
@@ -277,3 +282,118 @@ def test_run_result_is_frozen():
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):
         r.repo = "mutated"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Label auto-creation (alchemist#19)                                          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _reset_labels_cache():
+    """The per-process cache must be empty between tests so each test exercises
+    the full create-or-skip code path independently."""
+    from alchemist import runner as _runner_mod
+    _runner_mod._LABELS_ENSURED.clear()
+    yield
+    _runner_mod._LABELS_ENSURED.clear()
+
+
+def test_ensure_labels_creates_all_four_expected(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _ensure_labels
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _ensure_labels("autumngarage/touchstone", "alchemist-test")
+
+    label_names = [cmd[cmd.index("create") + 1] for cmd in calls if "label" in cmd]
+    assert sorted(label_names) == sorted([
+        "alchemist-test",
+        "alchemist-test-working",
+        "alchemist-test-shipped",
+        "alchemist-test-error",
+    ])
+
+
+def test_ensure_labels_uses_force_so_already_existing_is_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from alchemist.runner import _ensure_labels
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _ensure_labels("autumngarage/touchstone", "alchemist-test")
+    assert all("--force" in cmd for cmd in calls if "label" in cmd)
+
+
+def test_ensure_labels_cached_within_process(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _ensure_labels
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _ensure_labels("autumngarage/touchstone", "alchemist-test")
+    first_count = len(calls)
+    _ensure_labels("autumngarage/touchstone", "alchemist-test")  # second call
+    assert len(calls) == first_count, "second call should hit the cache, no new gh invocations"
+
+
+def test_ensure_labels_raises_on_gh_failure(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _ensure_labels, _GhError
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="permission denied"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(_GhError, match="could not ensure label"):
+        _ensure_labels("autumngarage/touchstone", "alchemist-test")
+
+
+def test_ensure_labels_skipped_in_dry_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """run_tick in dry-run mode must not mutate the target repo's labels."""
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=True)
+
+    run_tick(config)
+
+    # No label-create gh invocations should fire in dry-run mode.
+    assert captured["label_creates"] == []
+
+
+def test_ensure_labels_runs_before_clone_in_live_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Order matters: labels must exist before any branch transitions try to add them."""
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    # The label-create calls should appear before any git clone.
+    flat = captured["subprocess_run_args"]
+    label_create_indices = [i for i, cmd in enumerate(flat) if "label" in cmd and "create" in cmd]
+    git_clone_indices = [
+        i for i, cmd in enumerate(flat)
+        if "git" in cmd and "clone" in cmd
+    ]
+    assert label_create_indices, "expected at least one label create"
+    assert git_clone_indices, "expected at least one git clone"
+    assert max(label_create_indices) < min(git_clone_indices), (
+        "labels must be ensured before any git clone"
+    )
