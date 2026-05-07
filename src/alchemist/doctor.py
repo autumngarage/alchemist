@@ -72,8 +72,8 @@ def _state_dir_check(path: Path) -> Check:
     return Check(name="state dir", ok=True, detail=f"{path} writable")
 
 
-def _touchstone_review_script_check() -> Check:
-    """Locate touchstone's codex-review.sh script.
+def _touchstone_merge_pr_script_check() -> Check:
+    """Locate touchstone's merge-pr.sh — alchemist's review-and-merge gate.
 
     Looks at $TOUCHSTONE_ROOT first, then `brew --prefix touchstone`/libexec,
     then /opt/touchstone (Linux container convention).
@@ -81,8 +81,8 @@ def _touchstone_review_script_check() -> Check:
     candidates: list[Path] = []
     env_root = os.environ.get("TOUCHSTONE_ROOT")
     if env_root:
-        candidates.append(Path(env_root) / "scripts" / "codex-review.sh")
-        candidates.append(Path(env_root) / "libexec" / "scripts" / "codex-review.sh")
+        candidates.append(Path(env_root) / "scripts" / "merge-pr.sh")
+        candidates.append(Path(env_root) / "libexec" / "scripts" / "merge-pr.sh")
 
     try:
         result = subprocess.run(  # noqa: S603,S607 — brew is on PATH; deterministic args
@@ -93,22 +93,22 @@ def _touchstone_review_script_check() -> Check:
         )
         if result.returncode == 0:
             brew_root = Path(result.stdout.strip())
-            candidates.append(brew_root / "libexec" / "scripts" / "codex-review.sh")
+            candidates.append(brew_root / "libexec" / "scripts" / "merge-pr.sh")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    candidates.append(Path("/opt/touchstone/scripts/codex-review.sh"))
-    candidates.append(Path("/opt/touchstone/libexec/scripts/codex-review.sh"))
+    candidates.append(Path("/opt/touchstone/scripts/merge-pr.sh"))
+    candidates.append(Path("/opt/touchstone/libexec/scripts/merge-pr.sh"))
 
     for candidate in candidates:
         if candidate.exists():
             return Check(
-                name="touchstone codex-review.sh",
+                name="touchstone merge-pr.sh",
                 ok=True,
                 detail=f"found at {candidate}",
             )
     return Check(
-        name="touchstone codex-review.sh",
+        name="touchstone merge-pr.sh",
         ok=False,
         detail="not found — set $TOUCHSTONE_ROOT or install via brew",
     )
@@ -123,5 +123,5 @@ def run_doctor(config: Config) -> list[Check]:
         _which_check("touchstone", "brew install autumngarage/touchstone/touchstone"),
         _gh_auth_check(config.github_token_env),
         _state_dir_check(config.state_dir),
-        _touchstone_review_script_check(),
+        _touchstone_merge_pr_script_check(),
     ]

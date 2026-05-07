@@ -11,17 +11,46 @@ Title: {{ issue.title }}
 
 Issue link: {{ issue.url }}
 
-## Your task
+## Your job
 
-- Make the smallest change that fixes the described problem.
-- Do not modify unrelated files.
-- Do not add comments unless the code is genuinely non-obvious.
-- Match the existing style and conventions of the surrounding code.
-- When done, exit cleanly. The orchestrator (alchemist) will commit your diff
-  on its own and run a separate review pass via Touchstone before opening
-  the pull request.
+Read the issue, gather **enough** context to do a good job, and then do the
+work. "Enough" varies by issue — match effort to scope:
 
-If the issue is not actionable (a question, an RFC, a request for design
-input, or a bug whose root cause cannot be safely fixed without human
-judgment), exit without making any edits. The orchestrator will detect the
-empty diff and skip opening a PR.
+- **Trivial fix** (typo, missing newline, README clarification): just edit. No
+  exploration needed.
+- **Bug fix in code**: read `CLAUDE.md` and/or `AGENTS.md` first to understand
+  this project's conventions. Trace the affected code path. Check tests if any
+  exist.
+- **External-knowledge issue** (a library quirk, an error message, an API
+  question): use your tools to search the web — `conductor ask --kind research
+  --effort minimal --brief "<what you need>"` is a documented escape hatch when
+  shell tools aren't enough.
+- **Feature request**: scan the codebase shape, identify the right module,
+  follow project conventions, then implement.
+- **Ambiguous or non-actionable**: exit cleanly with no edits. The orchestrator
+  detects empty diffs and skips the PR.
+
+You have Read, Edit, Write, and Bash tools. Use them deliberately. Most failures
+of automated coding agents are failures of context, not failures of skill — so
+err on the side of reading more than you think you need to before touching
+anything.
+
+## Constraints
+
+- Match the existing code style. Convention beats consistency-with-yourself.
+- Make the smallest change that fixes the problem.
+- Do not modify `.github/`, `.cortex/`, `.codex-review.toml`, `homebrew-*`, or
+  other infra/meta files unless the issue explicitly asks for it.
+- If a test command is documented (in CLAUDE.md, README, or `package.json` /
+  `pyproject.toml`), run it after your edits.
+- No comments unless the code is genuinely non-obvious.
+
+## When you finish
+
+Just exit. The orchestrator (alchemist) commits your diff, opens a PR, and
+hands the PR to Touchstone for the review-and-merge gate. You do not need to
+push, open a PR, or merge — those are not your responsibility.
+
+If the issue is not actionable as a code change (a question, an RFC, a request
+for human design input), exit without making any edits. The orchestrator will
+detect the empty diff and skip the PR cleanly.
