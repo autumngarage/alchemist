@@ -173,6 +173,14 @@ The agent reviewed the issue, judged it can't be fixed as a code change (a quest
 
 **To retry:** sharpen the issue (link a code path, narrow scope) and re-label `<dispatch>`. The next tick picks it up fresh.
 
+### Budget exceeded
+
+The agent loop spent more than `default_budget` (per-issue cap, summed from conductor's `cost_usd` usage events). Alchemist refuses to push the diff, labels the issue `<dispatch>-error`, and preserves the transcript + NDJSON log for inspection.
+
+**Action:** read the transcript at `<state_dir>/transcripts/<repo>-<issue>.{log,ndjson}`. If the cost was legitimate (genuinely hard issue), bump the budget. If the agent looped, sharpen the issue text or pin a different provider (`ALCHEMIST_PROVIDER`) before retrying.
+
+Set `ALCHEMIST_BUDGET=""` or `"$0"` to disable enforcement entirely (not recommended in production).
+
 ### Touchstone review BLOCKED
 
 Touchstone's AI review found something it couldn't ship — could be a real bug in the agent's diff, or a project-convention violation, or a missing test. The PR stays open; touchstone posts review comments.
@@ -212,6 +220,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_LABEL` | `alchemist-test` | Dispatch label trigger |
 | `ALCHEMIST_DRY_RUN` | `true` | Skip mutations (no push, PR, label transitions) |
 | `ALCHEMIST_PROVIDER` | `openrouter` | Conductor provider for the agent loop |
+| `ALCHEMIST_BUDGET` | `$2` | Per-issue cost cap (USD); `$0` or empty disables |
 | `ALCHEMIST_MAX_PER_REPO_PER_TICK` | `1` | Issues from one repo per tick |
 | `ALCHEMIST_MAX_CONCURRENT_REPOS` | `1` | Repos processed in parallel (cross-repo swarm) |
 | `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Hard timeout on `conductor exec` |

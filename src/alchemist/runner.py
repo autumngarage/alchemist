@@ -255,6 +255,7 @@ def _process_locked(
         config.state_dir / "transcripts" / f"{repo.replace('/', '-')}-{issue.number}.log"
     )
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    ndjson_path = transcript_path.with_suffix(".ndjson")
 
     try:
         _run_conductor(
@@ -263,9 +264,14 @@ def _process_locked(
             provider=config.default_provider,
             timeout=config.conductor_timeout_sec,
             transcript_path=transcript_path,
+            ndjson_path=ndjson_path,
         )
     except _ToolError as exc:
         return _bail(repo, issue, started, config, f"conductor: {exc}")
+
+    budget_problem = _check_budget(ndjson_path, config.default_budget)
+    if budget_problem:
+        return _bail(repo, issue, started, config, f"budget-exceeded: {budget_problem}")
 
     if not _has_changes(work_dir):
         return _decline(
@@ -645,12 +651,15 @@ def _run_conductor(
     provider: str,
     timeout: int,
     transcript_path: Path,
+    ndjson_path: Path,
 ) -> None:
     """Run conductor exec; on success, conductor's edits are present in cwd.
 
     Stdout is streamed to the transcript file so an operator can `cat` it
     after the fact. Conductor's own --timeout flag is set in addition to
-    subprocess timeout for belt-and-suspenders.
+    subprocess timeout for belt-and-suspenders. The structured NDJSON event
+    stream is written to ndjson_path so alchemist can parse cost_usd from
+    `event=="usage"` records (alchemist#33).
     """
     cmd = [
         "conductor", "exec",
@@ -659,6 +668,7 @@ def _run_conductor(
         "--brief-file", str(brief_path),
         "--cwd", str(cwd),
         "--timeout", str(timeout),
+        "--log-file", str(ndjson_path),
     ]
     with transcript_path.open("w") as fh:
         try:
@@ -778,6 +788,74 @@ def _extract_agent_summary(transcript_path: Path, max_chars: int = 600) -> str |
         return None
     tail = text[-max_chars:].strip()
     return tail or None
+
+
+def _parse_budget(raw: str) -> float | None:
+    """Parse a budget string like "$2", "$1.50", or "0.25" → float USD.
+
+    Returns None when the budget is empty, zero, or unparseable — meaning
+    "no cap, fail open." The cap is opt-in: a deployment that wants no
+    enforcement can set ALCHEMIST_BUDGET="" or "$0".
+    """
+    if not raw:
+        return None
+    cleaned = raw.strip().lstrip("$").strip()
+    if not cleaned:
+        return None
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _extract_total_cost(ndjson_path: Path) -> float | None:
+    """Sum cost_usd across `event=="usage"` records in conductor's NDJSON.
+
+    Returns None if the log file is missing or has no usage events — that
+    state is "we don't know what it cost," distinct from "$0 spent." The
+    caller treats None as fail-open (no enforcement).
+    """
+    if not ndjson_path.exists():
+        return None
+    total = 0.0
+    seen_usage = False
+    try:
+        text = ndjson_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") != "usage":
+            continue
+        cost = record.get("data", {}).get("cost_usd")
+        if isinstance(cost, (int, float)):
+            total += float(cost)
+            seen_usage = True
+    return total if seen_usage else None
+
+
+def _check_budget(ndjson_path: Path, raw_budget: str) -> str | None:
+    """Return a human-readable problem string if the run exceeded budget.
+
+    Returns None when the run is within budget OR when enforcement is
+    disabled (empty/zero budget) OR when we couldn't parse cost (fail-open).
+    """
+    cap = _parse_budget(raw_budget)
+    if cap is None:
+        return None
+    spent = _extract_total_cost(ndjson_path)
+    if spent is None:
+        return None
+    if spent <= cap:
+        return None
+    return f"${spent:.2f} spent vs ${cap:.2f} budgeted"
 
 
 def _validate_diff(repo_dir: Path) -> str | None:
