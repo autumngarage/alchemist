@@ -1,0 +1,61 @@
+[project]
+name = "alchemist"
+dynamic = ["version"]
+description = "Issue-driven transmuter for the Autumn Garage family. Open issue in, reviewed PR out."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Henry Modisett" }]
+keywords = ["github", "issues", "automation", "agent", "autumngarage", "conductor", "touchstone"]
+
+dependencies = [
+    "click>=8.1.0",
+    "jinja2>=3.1.0",
+    "rich>=13.9.0",
+]
+
+[project.scripts]
+alchemist = "alchemist.cli:main"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/alchemist/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alchemist"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/alchemist/templates" = "alchemist/templates"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+    "ruff>=0.9.0",
+]
+
+[tool.uv]
+exclude-newer = "2026-05-06T00:00:00Z"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: live tool/network call — skipped when env not configured",
+]
+
+[[tool.mypy.overrides]]
+module = "alchemist._version"
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
