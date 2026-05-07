@@ -206,7 +206,7 @@ def _process_locked(
 
     brief_path = config.state_dir / "briefs" / f"{repo.replace('/', '-')}-{issue.number}.md"
     brief_path.parent.mkdir(parents=True, exist_ok=True)
-    brief_path.write_text(render_brief(issue, repo))
+    brief_path.write_text(render_brief(issue, repo, work_dir))
 
     transcript_path = (
         config.state_dir / "transcripts" / f"{repo.replace('/', '-')}-{issue.number}.log"

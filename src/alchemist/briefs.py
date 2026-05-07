@@ -19,10 +19,15 @@ from typing import TYPE_CHECKING
 from jinja2 import Environment, StrictUndefined
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from alchemist.scanner import DispatchIssue
 
 
 BRIEF_TEMPLATE_VERSION = "1"
+
+_CONVENTIONS_MAX_CHARS = 8 * 1024
+_CONVENTIONS_FILES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md")
 
 
 def _load_template_source(name: str) -> str:
@@ -39,10 +44,34 @@ def _env() -> Environment:
     )
 
 
-def render_brief(issue: DispatchIssue, repo: str) -> str:
+def _load_conventions(repo_dir: Path) -> tuple[str, str] | tuple[None, None]:
+    """Load project conventions from CLAUDE.md or AGENTS.md in priority order."""
+    for name in _CONVENTIONS_FILES:
+        path = repo_dir / name
+        if not path.exists():
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        if len(text) > _CONVENTIONS_MAX_CHARS:
+            text = (
+                f"{text[:_CONVENTIONS_MAX_CHARS]}\n\n"
+                f"[truncated; see full file at {name}]"
+            )
+        return text, name
+
+    return None, None
+
+
+def render_brief(issue: DispatchIssue, repo: str, repo_dir: Path) -> str:
     """Render the issue → brief markdown."""
+    conventions, conventions_source = _load_conventions(repo_dir)
     src = _load_template_source("brief.md.j2")
-    return _env().from_string(src).render(issue=issue, repo=repo)
+    return _env().from_string(src).render(
+        issue=issue,
+        repo=repo,
+        conventions=conventions,
+        conventions_source=conventions_source,
+    )
 
 
 def render_pr_body(*, issue: DispatchIssue, provider: str) -> str:

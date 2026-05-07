@@ -10,6 +10,16 @@ Title: {{ issue.title }}
 </untrusted-input>
 
 Issue link: {{ issue.url }}
+{% if conventions %}
+
+## Project conventions (verbatim from {{ conventions_source }})
+
+These are the project's conventions and constraints. Follow them. Anything you do should be consistent with what's here.
+
+```
+{{ conventions }}
+```
+{% endif %}
 
 ## Your job
 
