@@ -282,6 +282,13 @@ def _process_locked(
         # staging/pushing so we never open a PR with corrupted output.
         return _bail(repo, issue, started, config, f"diff-validate: {diff_problem}")
 
+    # If the target repo has a .cortex/ directory, append a journal entry
+    # before staging so it ships in the same PR as the diff. Best-effort.
+    agent_summary = _extract_agent_summary(transcript_path)
+    _maybe_write_cortex_journal(
+        work_dir, repo, issue, branch, config.default_provider, agent_summary,
+    )
+
     if config.dry_run:
         msg = (
             f"[DRY-RUN] {repo}#{issue.number}: would commit, push branch "
@@ -303,7 +310,7 @@ def _process_locked(
     body = render_pr_body(
         issue=issue,
         provider=config.default_provider,
-        agent_summary=_extract_agent_summary(transcript_path),
+        agent_summary=agent_summary,
     )
     pr_title = f"{_PR_TITLE_PREFIX} fix: {issue.title} (#{issue.number})"
     try:
@@ -675,6 +682,80 @@ def _has_changes(repo_dir: Path) -> bool:
         cwd=repo_dir, capture_output=True, text=True, timeout=10,
     )
     return bool(result.stdout.strip())
+
+
+def _maybe_write_cortex_journal(
+    work_dir: Path,
+    repo: str,
+    issue: DispatchIssue,
+    branch: str,
+    provider: str,
+    agent_summary: str | None,
+) -> None:
+    """If the target repo has a `.cortex/` directory, append a journal entry
+    documenting this alchemist transmute cycle. Best-effort — failures log
+    but don't fail the run.
+
+    Per the Cortex protocol (section 6: custom triggers), tools may add
+    project-specific entries. Alchemist's entry uses a `T1.6-alchemist`
+    trigger marker (T1.6 is the sentinel-cycle trigger; alchemist runs are
+    the analogous "agent did some work" event).
+
+    The journal entry is written into the cloned repo's working dir, so
+    `_stage_and_commit` picks it up and it ships in the same PR as the
+    diff. No second push or commit-amend needed.
+    """
+    cortex_dir = work_dir / ".cortex"
+    if not cortex_dir.is_dir():
+        return
+    journal_dir = cortex_dir / "journal"
+    try:
+        journal_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"alchemist: cortex journal mkdir failed: {exc}", file=sys.stderr)
+        return
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    iso_now = datetime.now(UTC).isoformat()
+    filename = f"{today}-alchemist-{issue.number}.md"
+    path = journal_dir / filename
+
+    summary_block = ""
+    if agent_summary:
+        # Indent each line by two spaces to keep it inside a Markdown
+        # blockquote-like fence, in case the summary contains funky chars.
+        summary_block = (
+            "\n## Agent summary\n\n"
+            "```\n"
+            f"{agent_summary[:600]}\n"
+            "```\n"
+        )
+
+    body = (
+        f"---\n"
+        f"title: alchemist transmuted issue #{issue.number}\n"
+        f"date: {iso_now}\n"
+        f"type: alchemist-cycle\n"
+        f"trigger: T1.6-alchemist\n"
+        f"issue: {issue.url}\n"
+        f"branch: {branch}\n"
+        f"provider: {provider}\n"
+        f"brief_template: {BRIEF_TEMPLATE_VERSION}\n"
+        f"---\n\n"
+        f"# Alchemist transmuted issue #{issue.number}\n\n"
+        f"## Issue\n\n"
+        f"> {issue.title}\n\n"
+        f"Source: {issue.url}\n\n"
+        f"## Cycle\n\n"
+        f"- Branch: `{branch}`\n"
+        f"- Provider: `{provider}`\n"
+        f"- Brief template: v{BRIEF_TEMPLATE_VERSION}\n"
+        f"{summary_block}"
+    )
+    try:
+        path.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        print(f"alchemist: cortex journal write failed: {exc}", file=sys.stderr)
 
 
 def _extract_agent_summary(transcript_path: Path, max_chars: int = 600) -> str | None:
