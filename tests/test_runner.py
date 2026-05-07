@@ -901,6 +901,102 @@ def test_sweep_stuck_noop_when_no_working_issues(
     assert captured["label_transitions"] == []
 
 
+# --------------------------------------------------------------------------- #
+# Cortex T1.6-style journal integration (alchemist#7)                         #
+# --------------------------------------------------------------------------- #
+
+
+def _journal_issue() -> DispatchIssue:
+    return DispatchIssue(
+        number=7,
+        title="Fix README typo",
+        body="There's a typo on line 12.",
+        url="https://github.com/autumngarage/touchstone/issues/7",
+        repository="autumngarage/touchstone",
+        updated_at="2026-05-07T10:00:00Z",
+        labels=("alchemist-test",),
+    )
+
+
+def test_cortex_journal_written_when_dot_cortex_exists(tmp_path: Path):
+    """If `.cortex/` is present in the cloned repo, alchemist appends a
+    journal entry before staging so it ships in the same PR."""
+    from alchemist.runner import _maybe_write_cortex_journal
+
+    (tmp_path / ".cortex").mkdir()
+    _maybe_write_cortex_journal(
+        tmp_path,
+        "autumngarage/touchstone",
+        _journal_issue(),
+        "alchemist/issue-7-fix-typo",
+        "openrouter",
+        "Read the README, fixed the typo on line 12.",
+    )
+
+    journal_dir = tmp_path / ".cortex" / "journal"
+    entries = list(journal_dir.glob("*-alchemist-7.md"))
+    assert len(entries) == 1
+    body = entries[0].read_text()
+    assert "trigger: T1.6-alchemist" in body
+    assert "Fix README typo" in body
+    assert "alchemist/issue-7-fix-typo" in body
+    assert "Read the README, fixed the typo" in body
+
+
+def test_cortex_journal_skipped_when_no_dot_cortex(tmp_path: Path):
+    """No `.cortex/` directory → no journal entry written, no error."""
+    from alchemist.runner import _maybe_write_cortex_journal
+
+    _maybe_write_cortex_journal(
+        tmp_path,
+        "autumngarage/touchstone",
+        _journal_issue(),
+        "alchemist/issue-7-fix-typo",
+        "openrouter",
+        None,
+    )
+    # No directory created, no error raised — silent skip.
+    assert not (tmp_path / ".cortex").exists()
+
+
+def test_cortex_journal_handles_missing_agent_summary(tmp_path: Path):
+    """Without an agent summary, the entry still writes but omits that section."""
+    from alchemist.runner import _maybe_write_cortex_journal
+
+    (tmp_path / ".cortex").mkdir()
+    _maybe_write_cortex_journal(
+        tmp_path,
+        "autumngarage/touchstone",
+        _journal_issue(),
+        "alchemist/issue-7-fix-typo",
+        "openrouter",
+        None,
+    )
+
+    entries = list((tmp_path / ".cortex" / "journal").glob("*.md"))
+    assert len(entries) == 1
+    body = entries[0].read_text()
+    assert "## Agent summary" not in body  # section absent
+    assert "Fix README typo" in body  # rest still rendered
+
+
+def test_cortex_journal_creates_journal_dir_if_missing(tmp_path: Path):
+    """`.cortex/` exists but `.cortex/journal/` doesn't — alchemist creates it."""
+    from alchemist.runner import _maybe_write_cortex_journal
+
+    (tmp_path / ".cortex").mkdir()
+    # No journal subdir.
+    _maybe_write_cortex_journal(
+        tmp_path,
+        "autumngarage/touchstone",
+        _journal_issue(),
+        "alchemist/issue-7-fix-typo",
+        "openrouter",
+        None,
+    )
+    assert (tmp_path / ".cortex" / "journal").is_dir()
+
+
 def test_sweep_stuck_skipped_in_dry_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
