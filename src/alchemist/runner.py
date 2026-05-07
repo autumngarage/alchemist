@@ -20,6 +20,7 @@ Alchemist owns ONLY:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -48,6 +50,12 @@ if TYPE_CHECKING:
 _GIT_AUTHOR_NAME = "Alchemist"
 _GIT_AUTHOR_EMAIL = "alchemist@autumngarage.dev"
 _PR_TITLE_PREFIX = "[alchemist]"
+
+# Stuck-state sweep threshold: an issue stuck in `<dispatch>-working` for
+# longer than this is considered orphaned by a crashed tick. Conservatively
+# wider than the worst-case healthy tick (conductor 600s + review 900s + a
+# small buffer) so we don't sweep an active worker.
+_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
@@ -70,6 +78,10 @@ def run_tick(config: Config) -> list[RunResult]:
     Issues are grouped by repo. Within a repo, only one worker runs at a
     time (the per-repo lock is the constraint). Across repos, up to
     `max_concurrent_repos` workers run in parallel — that's the swarm.
+
+    Before the normal scan, also runs a "stuck sweep" that transitions
+    issues stuck in `<dispatch>-working` for longer than 30 minutes back
+    to an error state. Self-heals tick crashes that left labels orphaned.
     """
     checks = run_doctor(config)
     failed = [c for c in checks if not c.ok]
@@ -81,11 +93,13 @@ def run_tick(config: Config) -> list[RunResult]:
         )
         return []
 
+    sweep_results = _sweep_stuck(config)
+
     try:
         issues = scan(org=config.org, label=config.dispatch_label)
     except Exception as exc:  # noqa: BLE001 — surface any scanner failure to operator
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
-        return []
+        return sweep_results
 
     if config.repo_blocklist:
         skipped = [i for i in issues if i.repository in config.repo_blocklist]
@@ -107,18 +121,18 @@ def run_tick(config: Config) -> list[RunResult]:
     ]
 
     if not work:
-        return []
+        return sweep_results
 
     workers = max(1, min(config.max_concurrent_repos, len(work)))
     if workers == 1:
-        results: list[RunResult] = []
+        results: list[RunResult] = list(sweep_results)
         for repo, slice_ in work:
             results.extend(_process_repo(repo, slice_, config))
         return results
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_process_repo, repo, slice_, config) for repo, slice_ in work]
-        return [r for fut in futures for r in fut.result()]
+        return list(sweep_results) + [r for fut in futures for r in fut.result()]
 
 
 def _process_repo(
@@ -441,6 +455,94 @@ def _ensure_labels(repo: str, dispatch_label: str) -> None:
             )
 
     _LABELS_ENSURED.add(cache_key)
+
+
+def _sweep_stuck(config: Config) -> list[RunResult]:
+    """Find issues stuck in `<dispatch>-working` longer than the threshold and
+    transition them to `<dispatch>-error`. Self-heals tick crashes that left
+    labels mid-transition.
+
+    Skipped in dry-run (mutating).
+
+    Race window: if an active worker is just finishing, the sweep could
+    transition to error while the worker overwrites with shipped. The two
+    transitions are independent gh API calls; whichever lands last wins.
+    Acceptable for autumn-garage's scale.
+    """
+    if config.dry_run:
+        return []
+
+    working_label = _working_label(config.dispatch_label)[1]
+    cmd = [
+        "gh", "search", "issues",
+        "--owner", config.org,
+        "--label", working_label,
+        "--state", "open",
+        "--json", "number,title,repository,updatedAt",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"alchemist: stuck-sweep search failed: {exc}", file=sys.stderr)
+        return []
+    if result.returncode != 0:
+        print(
+            f"alchemist: stuck-sweep search exit {result.returncode}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return []
+    try:
+        items = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError as exc:
+        print(f"alchemist: stuck-sweep parse failed: {exc}", file=sys.stderr)
+        return []
+
+    now = datetime.now(UTC)
+    threshold = timedelta(seconds=_STUCK_SWEEP_THRESHOLD_SEC)
+    swept: list[RunResult] = []
+    for item in items:
+        repo_obj = item.get("repository") or {}
+        repo = repo_obj.get("nameWithOwner") or repo_obj.get("name") or ""
+        issue_num = item.get("number")
+        updated_str = item.get("updatedAt", "")
+        if not (repo and issue_num and updated_str):
+            continue
+        try:
+            updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        age = now - updated
+        if age < threshold:
+            continue
+
+        message = (
+            f"detected stuck `-working` state ({age.total_seconds() / 60:.0f} min old); "
+            "transitioning to error"
+        )
+        _post_activity_comment(
+            repo, issue_num,
+            f"alchemist: {message}\n\n"
+            "A previous tick exited without completing the label transition. "
+            "Inspect any outstanding branches before retrying.",
+            config,
+        )
+        with contextlib.suppress(_GhError):
+            _set_label(repo, issue_num, _error_label(config.dispatch_label), config)
+
+        swept.append(
+            RunResult(
+                repo=repo,
+                issue_number=issue_num,
+                pr_url=None,
+                merged=None,
+                error=f"stuck-sweep: {message}",
+                elapsed_sec=0.0,
+                dry_run=config.dry_run,
+            )
+        )
+    return swept
 
 
 def _set_label(repo: str, issue_number: int, transition: tuple[str, str], config: Config) -> None:

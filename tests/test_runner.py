@@ -796,3 +796,132 @@ def test_extract_agent_summary_caps_to_max_chars(tmp_path: Path):
     summary = _extract_agent_summary(transcript, max_chars=500)
     assert summary is not None
     assert len(summary) <= 500
+
+
+# --------------------------------------------------------------------------- #
+# Stuck-state sweep (alchemist#34)                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _stuck_sweep_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stuck_items: list[dict],
+):
+    """Stub gh + label calls for testing _sweep_stuck in isolation."""
+    captured: dict[str, list] = {
+        "label_transitions": [],
+        "comments": [],
+    }
+    import json as _json
+
+    def fake_run(cmd, *args, **kwargs):
+        if "search" in cmd and "issues" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=_json.dumps(stuck_items), stderr=""
+            )
+        if "issue" in cmd and "edit" in cmd:
+            captured["label_transitions"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "issue" in cmd and "comment" in cmd:
+            captured["comments"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return captured
+
+
+def test_sweep_stuck_transitions_old_working_issues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """An issue 60 minutes old in `-working` should be swept (threshold = 30 min)."""
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Old stuck issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.repo == "autumngarage/touchstone"
+    assert r.issue_number == 42
+    assert r.error is not None
+    assert "stuck-sweep" in r.error
+    # Comment posted + label transition fired.
+    assert len(captured["comments"]) == 1
+    assert len(captured["label_transitions"]) == 1
+
+
+def test_sweep_stuck_skips_recent_working_issues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """An issue 5 minutes old in `-working` is below threshold — leave alone."""
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    recent_ts = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    recent = [{
+        "number": 7,
+        "title": "Recent in-flight issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": recent_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=recent)
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert results == []
+    assert captured["label_transitions"] == []
+    assert captured["comments"] == []
+
+
+def test_sweep_stuck_noop_when_no_working_issues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _sweep_stuck
+
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=[])
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert results == []
+    assert captured["label_transitions"] == []
+
+
+def test_sweep_stuck_skipped_in_dry_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Dry-run mode never mutates external state — sweep is a no-op."""
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "would be swept in live mode",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+
+    config = _config(tmp_path, dry_run=True)
+    results = _sweep_stuck(config)
+
+    assert results == []
+    # Dry-run skips the gh search entirely.
+    assert captured["label_transitions"] == []
+    assert captured["comments"] == []
