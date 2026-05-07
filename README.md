@@ -64,8 +64,14 @@ state_dir = "/var/alchemist/state"
 max_per_tick = 1                   # bounded blast radius for the first week
 ```
 
+`default_budget` caps conductor spend per dispatched issue. After conductor
+exec finishes, alchemist sums `cost_usd` from the structured NDJSON event log
+and bails (`error: "budget-exceeded: $X spent vs $Y budgeted"`) if the run
+exceeded it — the issue lands in `-error` for human triage. Set to `"$0"` or
+empty to disable enforcement.
+
 Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
-`ALCHEMIST_PROVIDER`, `ALCHEMIST_STATE_DIR`, `ALCHEMIST_MAX_PER_TICK`.
+`ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`, `ALCHEMIST_MAX_PER_TICK`.
 
 Required externally:
 - `GITHUB_TOKEN` — fine-grained PAT (or GitHub App installation token) with

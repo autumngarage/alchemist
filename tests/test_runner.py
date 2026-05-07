@@ -1021,3 +1021,95 @@ def test_sweep_stuck_skipped_in_dry_run(
     # Dry-run skips the gh search entirely.
     assert captured["label_transitions"] == []
     assert captured["comments"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Budget cap (alchemist#33)                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_budget_handles_dollar_sign_and_decimal():
+    from alchemist.runner import _parse_budget
+    assert _parse_budget("$2") == 2.0
+    assert _parse_budget("$1.50") == 1.5
+    assert _parse_budget("0.25") == 0.25
+    assert _parse_budget("  $3 ") == 3.0
+
+
+def test_parse_budget_returns_none_when_disabled():
+    """Empty / zero / non-numeric → None means 'fail open, no cap.'"""
+    from alchemist.runner import _parse_budget
+    assert _parse_budget("") is None
+    assert _parse_budget("$0") is None
+    assert _parse_budget("$") is None
+    assert _parse_budget("nope") is None
+
+
+def test_extract_total_cost_sums_usage_events(tmp_path: Path):
+    from alchemist.runner import _extract_total_cost
+    log = tmp_path / "session.ndjson"
+    log.write_text(
+        '{"event": "route_decision", "data": {"provider": "claude"}}\n'
+        '{"event": "usage", "data": {"provider": "claude", "cost_usd": 0.18}}\n'
+        '{"event": "tool_call", "data": {"name": "Read"}}\n'
+        '{"event": "usage", "data": {"provider": "claude", "cost_usd": 0.07}}\n'
+    )
+    assert _extract_total_cost(log) == pytest.approx(0.25)
+
+
+def test_extract_total_cost_returns_none_when_no_usage(tmp_path: Path):
+    """No usage events → None ('we don't know'), distinct from 0.0."""
+    from alchemist.runner import _extract_total_cost
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "route_decision", "data": {}}\n')
+    assert _extract_total_cost(log) is None
+
+
+def test_extract_total_cost_returns_none_when_missing(tmp_path: Path):
+    from alchemist.runner import _extract_total_cost
+    assert _extract_total_cost(tmp_path / "missing.ndjson") is None
+
+
+def test_extract_total_cost_skips_malformed_lines(tmp_path: Path):
+    from alchemist.runner import _extract_total_cost
+    log = tmp_path / "session.ndjson"
+    log.write_text(
+        "not-json\n"
+        '{"event": "usage", "data": {"cost_usd": 0.10}}\n'
+        '{"event": "usage", "data": {"cost_usd": "not-a-number"}}\n'
+    )
+    assert _extract_total_cost(log) == pytest.approx(0.10)
+
+
+def test_check_budget_returns_problem_when_over(tmp_path: Path):
+    from alchemist.runner import _check_budget
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "usage", "data": {"cost_usd": 5.20}}\n')
+    problem = _check_budget(log, "$2")
+    assert problem == "$5.20 spent vs $2.00 budgeted"
+
+
+def test_check_budget_returns_none_when_within(tmp_path: Path):
+    from alchemist.runner import _check_budget
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "usage", "data": {"cost_usd": 0.50}}\n')
+    assert _check_budget(log, "$2") is None
+
+
+def test_check_budget_disabled_when_budget_empty(tmp_path: Path):
+    """Empty budget means no enforcement, regardless of cost."""
+    from alchemist.runner import _check_budget
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "usage", "data": {"cost_usd": 999.00}}\n')
+    assert _check_budget(log, "") is None
+    assert _check_budget(log, "$0") is None
+
+
+def test_check_budget_fails_open_when_cost_unknown(tmp_path: Path):
+    """Missing NDJSON or no usage events → don't bail. Better than blocking
+    the whole flow on a logging glitch."""
+    from alchemist.runner import _check_budget
+    assert _check_budget(tmp_path / "missing.ndjson", "$2") is None
+    log = tmp_path / "empty.ndjson"
+    log.write_text('{"event": "route_decision"}\n')
+    assert _check_budget(log, "$2") is None
