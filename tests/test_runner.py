@@ -54,7 +54,9 @@ def _stub_all_external(
     *,
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
-    merge_outcome: str = "merged",   # "merged" | "blocked" | "missing"
+    # "merged" | "blocked" | "missing" |
+    # "timeout-but-actually-merged" | "timeout-and-not-merged"
+    merge_outcome: str = "merged",
 ):
     """Patch every subprocess.* + scanner + doctor used by the runner.
 
@@ -104,6 +106,20 @@ def _stub_all_external(
                 stderr="",
             )
 
+        if "pr" in cmd and "view" in cmd and "--json" in cmd and "mergedAt" in cmd:
+            if merge_outcome == "timeout-but-actually-merged":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout="2026-05-07T11:16:50Z\n",
+                    stderr="",
+                )
+            if merge_outcome == "timeout-and-not-merged":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="\n", stderr="")
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="not found"
+            )
+
         if "git" in cmd and "push" in cmd:
             captured["push_calls"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
@@ -120,6 +136,8 @@ def _stub_all_external(
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
+            if merge_outcome in ("timeout-but-actually-merged", "timeout-and-not-merged"):
+                raise subprocess.TimeoutExpired(cmd, timeout=10)
             rc = 0 if merge_outcome == "merged" else 1
             return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout="", stderr="")
 
@@ -282,6 +300,53 @@ def test_run_result_is_frozen():
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):
         r.repo = "mutated"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Post-timeout PR state recheck (alchemist#22)                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_post_timeout_recheck_detects_actual_merge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """merge-pr.sh subprocess timed out, but the PR actually merged.
+    The recheck queries gh and reports merged=True correctly."""
+    captured = _stub_all_external(monkeypatch, merge_outcome="timeout-but-actually-merged")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.merged is True, f"expected merged=True after recheck; got {r}"
+    assert r.error is None, f"expected no error after successful recheck; got {r.error!r}"
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    # Both label transitions fired: working AND shipped.
+    assert len(captured["label_transitions"]) == 2
+
+
+def test_post_timeout_recheck_confirms_genuine_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """merge-pr.sh times out AND the PR is genuinely not merged.
+    recheck returns False; alchemist correctly reports merged=False with
+    the timeout error preserved."""
+    captured = _stub_all_external(monkeypatch, merge_outcome="timeout-and-not-merged")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.merged is False
+    assert r.error is not None
+    assert "merge-pr" in r.error
+    assert "timeout" in r.error.lower()
+    # The PR was opened — keep the URL so a human can pick it up.
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    # Only the working transition fired; no shipped transition because not merged.
+    assert len(captured["label_transitions"]) == 1
 
 
 # --------------------------------------------------------------------------- #

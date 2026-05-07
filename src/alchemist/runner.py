@@ -267,13 +267,17 @@ def _process_locked(
     try:
         merged = _run_merge_pr(work_dir, pr_number, config.review_timeout_sec)
     except _ToolError as exc:
-        # Couldn't even run merge-pr.sh (script missing, hard timeout, etc.).
-        # The PR is open; surface this as a non-fatal status — the review can
-        # still happen via touchstone's pre-push hook on a manual rebase.
-        return _result(
-            repo, issue.number, started, config,
-            pr_url=pr_url, merged=False, error=f"merge-pr: {exc}",
-        )
+        # merge-pr.sh subprocess died; the merge may have already landed.
+        # Query the PR's actual state before reporting failure.
+        if _check_pr_merged(repo, pr_number):
+            merged = True
+        else:
+            # Couldn't run/finish merge-pr.sh and can't confirm merged state.
+            # Keep the PR URL so a human can pick up triage if needed.
+            return _result(
+                repo, issue.number, started, config,
+                pr_url=pr_url, merged=False, error=f"merge-pr: {exc}",
+            )
 
     if merged:
         with contextlib.suppress(_GhError):
@@ -572,6 +576,27 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> bool:
         raise _ToolError(f"merge-pr.sh timeout after {timeout}s") from exc
 
     return result.returncode == 0
+
+
+def _check_pr_merged(repo: str, pr_number: int) -> bool:
+    """Return True if the PR has actually been merged (post-timeout safety check)."""
+    cmd = [
+        "gh", "pr", "view", str(pr_number),
+        "--repo", repo,
+        "--json", "mergedAt",
+        "--jq", ".mergedAt",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    output = result.stdout.strip()
+    # `gh ... --jq .mergedAt` returns the timestamp string when merged, or empty/null otherwise.
+    return bool(output) and output not in ("null", "")
 
 
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
