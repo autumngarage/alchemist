@@ -1,6 +1,16 @@
 Closes {{ issue.url }}
 
 > {{ issue.title }}
+{% if agent_summary %}
+
+## Agent summary
+
+> Excerpted from the agent's transcript tail; not part of the diff.
+
+```
+{{ agent_summary }}
+```
+{% endif %}
 
 ---
 

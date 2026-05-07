@@ -93,3 +93,28 @@ def test_pr_body_links_to_source_issue_and_attributes_alchemist():
 def test_pr_body_mentions_touchstone_runs_review_after_open():
     body = render_pr_body(issue=_issue(), provider="openrouter")
     assert "Touchstone" in body and "review" in body
+
+
+def test_pr_body_includes_agent_summary_when_provided():
+    body = render_pr_body(
+        issue=_issue(),
+        provider="openrouter",
+        agent_summary=(
+            "Read the README, identified the typo on line 12, "
+            "replaced 'tranmute' with 'transmute'."
+        ),
+    )
+    assert "Agent summary" in body
+    assert "tranmute" in body
+    assert "transmute" in body
+
+
+def test_pr_body_omits_agent_summary_section_when_none():
+    body = render_pr_body(issue=_issue(), provider="openrouter", agent_summary=None)
+    assert "Agent summary" not in body
+
+
+def test_pr_body_omits_agent_summary_section_when_empty_string():
+    """Empty/whitespace-only summaries should be treated like None — no section."""
+    body = render_pr_body(issue=_issue(), provider="openrouter", agent_summary="")
+    assert "Agent summary" not in body
