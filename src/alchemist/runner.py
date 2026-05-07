@@ -244,7 +244,7 @@ def _process_locked(
         return _bail(repo, issue, started, config, f"conductor: {exc}")
 
     if not _has_changes(work_dir):
-        return _bail(
+        return _decline(
             repo,
             issue,
             started,
@@ -347,6 +347,13 @@ def _shipped_label(dispatch: str) -> tuple[str, str]:
     return working, add
 
 
+def _declined_label(dispatch: str) -> tuple[str, str]:
+    """Return (remove, add) for any → declined."""
+    working = _working_label(dispatch)[1]
+    add = dispatch.replace("-dispatch", "-declined").replace("-test", "-test-declined")
+    return working, add
+
+
 def _error_label(dispatch: str) -> tuple[str, str]:
     """Return (remove, add) for any → error."""
     working = _working_label(dispatch)[1]
@@ -356,22 +363,27 @@ def _error_label(dispatch: str) -> tuple[str, str]:
 
 _LABEL_PALETTE: tuple[tuple[str, str, str], ...] = (
     # (suffix-key, color, description). The first row is the bare dispatch
-    # label; the next three are the state-machine successors derived from it.
-    ("base",    "ffd787", "Dispatched to Alchemist for transmutation"),
-    ("working", "fff5d7", "Alchemist actively working"),
-    ("shipped", "d7ffd7", "Alchemist shipped a PR"),
-    ("error",   "ffd7d7", "Alchemist hit an error"),
+    # label; the next four are the state-machine successors derived from it.
+    ("base",     "ffd787", "Dispatched to Alchemist for transmutation"),
+    ("working",  "fff5d7", "Alchemist actively working"),
+    ("shipped",  "d7ffd7", "Alchemist shipped a PR"),
+    ("declined", "d7d7ff", "Alchemist reviewed and declined to make changes"),
+    ("error",    "ffd7d7", "Alchemist hit an error"),
 )
 
 
 def _expected_labels(dispatch_label: str) -> dict[str, tuple[str, str]]:
-    """Return {label_name: (color, description)} for the four labels alchemist
+    """Return {label_name: (color, description)} for the five labels alchemist
     needs on every watched repo."""
     base = dispatch_label
     working = _working_label(dispatch_label)[1]
     shipped = _shipped_label(dispatch_label)[1]
+    declined = _declined_label(dispatch_label)[1]
     error = _error_label(dispatch_label)[1]
-    names = {"base": base, "working": working, "shipped": shipped, "error": error}
+    names = {
+        "base": base, "working": working, "shipped": shipped,
+        "declined": declined, "error": error,
+    }
     return {
         names[key]: (color, desc)
         for key, color, desc in _LABEL_PALETTE
@@ -721,6 +733,37 @@ def _bail(
         _post_error_comment(repo, issue.number, message, config)
         with contextlib.suppress(_GhError):
             _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
+    return _result(repo, issue.number, started, config, error=message)
+
+
+def _decline(
+    repo: str, issue: DispatchIssue, started: float, config: Config, message: str,
+) -> RunResult:
+    """Decline path: the LLM correctly judged the issue non-actionable.
+
+    Distinct from `_bail` (which is for tool failures): the agent did its
+    job by recognizing the issue as not-a-fix-target and exiting cleanly.
+    Comment frames it as a deliberate decline, label transitions to
+    `<dispatch>-declined` (not `-error`), so the audit trail is honest.
+    """
+    if not config.dry_run:
+        _post_activity_comment(
+            repo, issue.number,
+            f"alchemist: declined — {message}\n\n"
+            "The agent reviewed this issue and judged it non-actionable as a "
+            "code change. To retry, address the underlying ambiguity (sharpen "
+            "the ask, link a code path, narrow scope) and re-label "
+            f"`{config.dispatch_label}`.",
+            config,
+        )
+        with contextlib.suppress(_GhError):
+            _set_label(
+                repo, issue.number,
+                _declined_label(config.dispatch_label),
+                config,
+            )
+    # Keep error= populated so logs surface it; cli.py's benign_prefixes
+    # already includes "conductor produced no diff" so the process exits 0.
     return _result(repo, issue.number, started, config, error=message)
 
 

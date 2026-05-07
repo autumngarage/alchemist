@@ -256,7 +256,10 @@ def test_merge_pr_script_missing_records_nonfatal_error(
     assert len(captured["pr_creates"]) == 1
 
 
-def test_no_diff_produced_results_in_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_no_diff_produced_results_in_decline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The agent correctly judging an issue non-actionable (no diff) is a
+    DECLINE, not an error. Label transitions to `<dispatch>-declined`,
+    comment frames it as a deliberate decline."""
     captured = _stub_all_external(monkeypatch, conductor_outcome="no-diff")
     config = _config(tmp_path, dry_run=False)
 
@@ -264,9 +267,39 @@ def test_no_diff_produced_results_in_error(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert len(results) == 1
     r = results[0]
-    assert r.error is not None
+    assert r.error is not None  # populated for log visibility
     assert "no diff" in r.error.lower()
     assert captured["pr_creates"] == []
+    # Label transition is to declined, not error.
+    transitions = captured["label_transitions"]
+    add_labels = [
+        cmd[cmd.index("--add-label") + 1] for cmd in transitions if "--add-label" in cmd
+    ]
+    assert "alchemist-test-declined" in add_labels, (
+        f"expected -declined transition; got {add_labels}"
+    )
+    assert "alchemist-test-error" not in add_labels
+    # Comment frames the outcome as a deliberate decline.
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("declined" in b for b in bodies), f"expected 'declined' comment; got {bodies}"
+
+
+def test_ensure_labels_creates_declined_label(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _ensure_labels
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _ensure_labels("autumngarage/touchstone", "alchemist-test")
+
+    label_names = [cmd[cmd.index("create") + 1] for cmd in calls if "label" in cmd]
+    assert "alchemist-test-declined" in label_names
+    # Now five expected labels (added 'declined' to the original four).
+    assert len(label_names) == 5
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -374,7 +407,7 @@ def _reset_labels_cache():
     _runner_mod._LABELS_ENSURED.clear()
 
 
-def test_ensure_labels_creates_all_four_expected(monkeypatch: pytest.MonkeyPatch):
+def test_ensure_labels_creates_all_five_expected(monkeypatch: pytest.MonkeyPatch):
     from alchemist.runner import _ensure_labels
 
     calls: list[list[str]] = []
@@ -391,6 +424,7 @@ def test_ensure_labels_creates_all_four_expected(monkeypatch: pytest.MonkeyPatch
         "alchemist-test",
         "alchemist-test-working",
         "alchemist-test-shipped",
+        "alchemist-test-declined",
         "alchemist-test-error",
     ])
 
