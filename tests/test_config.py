@@ -25,7 +25,8 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.org == "autumngarage"
     assert cfg.dispatch_label == "alchemist-test"
     assert cfg.dry_run is True
-    assert cfg.max_per_tick == 1
+    assert cfg.max_per_repo_per_tick == 1
+    assert cfg.max_concurrent_repos == 1
 
 
 def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -36,7 +37,8 @@ def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 org = "henrymodisett"
 dispatch_label = "alchemist-dispatch"
 dry_run = false
-max_per_tick = 3
+max_per_repo_per_tick = 3
+max_concurrent_repos = 5
 """
     )
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(cfg_file))
@@ -44,7 +46,8 @@ max_per_tick = 3
     assert cfg.org == "henrymodisett"
     assert cfg.dispatch_label == "alchemist-dispatch"
     assert cfg.dry_run is False
-    assert cfg.max_per_tick == 3
+    assert cfg.max_per_repo_per_tick == 3
+    assert cfg.max_concurrent_repos == 5
 
 
 def test_env_var_overrides_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -81,7 +84,8 @@ def test_config_is_frozen():
         poll_interval_minutes=5,
         state_dir=Path("/tmp"),
         dry_run=True,
-        max_per_tick=1,
+        max_per_repo_per_tick=1,
+        max_concurrent_repos=1,
         conductor_timeout_sec=600,
         review_timeout_sec=300,
         github_token_env="GITHUB_TOKEN",

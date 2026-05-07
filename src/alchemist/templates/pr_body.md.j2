@@ -1,0 +1,27 @@
+## Source issue
+
+Closes {{ issue.url }}
+
+> {{ issue.title }}
+
+## Touchstone review
+
+`{{ review_verdict }}`
+
+{% if review_summary %}
+{{ review_summary }}
+{% endif %}
+
+{% if cost_summary %}
+## Conductor cost
+
+```
+{{ cost_summary }}
+```
+{% endif %}
+
+---
+
+🤖 Transmuted by [Alchemist](https://github.com/autumngarage/alchemist) ·
+brief template v{{ brief_version }} · provider `{{ provider }}` ·
+{{ branch_kind }}-mode

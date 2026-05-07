@@ -36,8 +36,23 @@ def test_banner_subcommand_prints_attribution():
     assert "Autumn Garage" in out
 
 
-def test_run_once_not_implemented_yet():
+def test_run_once_json_with_no_work(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
+    monkeypatch.setattr("alchemist.runner.run_tick", lambda config: [])
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run-once", "--json"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "[]"
+
+
+def test_run_once_text_with_no_work(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
+    monkeypatch.setattr("alchemist.runner.run_tick", lambda config: [])
+
     runner = CliRunner()
     result = runner.invoke(main, ["run-once"])
-    assert result.exit_code != 0
-    assert "v0.1" in result.output or "v0.1" in (result.stderr or "")
+    assert result.exit_code == 0
+    assert "no work this tick" in result.output

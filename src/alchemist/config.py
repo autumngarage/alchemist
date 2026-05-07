@@ -33,7 +33,8 @@ class Config:
     poll_interval_minutes: int
     state_dir: Path
     dry_run: bool
-    max_per_tick: int
+    max_per_repo_per_tick: int   # how many issues to take from any one repo per tick
+    max_concurrent_repos: int     # how many repos to fan out across in parallel
     conductor_timeout_sec: int
     review_timeout_sec: int
     github_token_env: str
@@ -51,7 +52,11 @@ _DEFAULTS: dict[str, object] = {
     "poll_interval_minutes": 5,
     "state_dir": "/var/alchemist/state",
     "dry_run": True,
-    "max_per_tick": 1,
+    # Bounded blast radius for the dogfood period: 1 issue per repo, 1 repo at
+    # a time. After dogfood B is clean, lift max_concurrent_repos to e.g. 3
+    # to enable cross-repo swarm.
+    "max_per_repo_per_tick": 1,
+    "max_concurrent_repos": 1,
     "conductor_timeout_sec": 600,
     "review_timeout_sec": 300,
     "github_token_env": "GITHUB_TOKEN",
@@ -115,7 +120,8 @@ def load_config() -> Config:
         "ALCHEMIST_POLL_INTERVAL_MINUTES": "poll_interval_minutes",
         "ALCHEMIST_STATE_DIR": "state_dir",
         "ALCHEMIST_DRY_RUN": "dry_run",
-        "ALCHEMIST_MAX_PER_TICK": "max_per_tick",
+        "ALCHEMIST_MAX_PER_REPO_PER_TICK": "max_per_repo_per_tick",
+        "ALCHEMIST_MAX_CONCURRENT_REPOS": "max_concurrent_repos",
         "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
         "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
@@ -132,7 +138,8 @@ def load_config() -> Config:
         poll_interval_minutes=_coerce_int(merged["poll_interval_minutes"]),
         state_dir=Path(str(merged["state_dir"])),
         dry_run=_coerce_bool(merged["dry_run"]),
-        max_per_tick=_coerce_int(merged["max_per_tick"]),
+        max_per_repo_per_tick=_coerce_int(merged["max_per_repo_per_tick"]),
+        max_concurrent_repos=_coerce_int(merged["max_concurrent_repos"]),
         conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
         review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
         github_token_env=str(merged["github_token_env"]),
