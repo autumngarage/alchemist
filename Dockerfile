@@ -50,7 +50,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # pipx for isolated Python tool installs (conductor + alchemist itself).
-RUN pip install --no-cache-dir pipx==1.7.1
+# uv is needed because many target-repo touchstone preflight validate steps
+# run via `uv run ...`.
+RUN pip install --no-cache-dir pipx==1.7.1 uv==0.5.11
 
 # Touchstone: cloned at a pinned tag, exposed at $TOUCHSTONE_ROOT and on PATH.
 # Alchemist invokes $TOUCHSTONE_ROOT/scripts/codex-review.sh from the cloned

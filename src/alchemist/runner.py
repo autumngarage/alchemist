@@ -982,6 +982,13 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> bool:
     except subprocess.TimeoutExpired as exc:
         raise _ToolError(f"merge-pr.sh timeout after {timeout}s") from exc
 
+    if result.returncode != 0:
+        merged_output = f"{result.stdout or ''}{result.stderr or ''}"
+        tail_lines = merged_output.splitlines()[-50:]
+        print(f"merge-pr.sh exited {result.returncode}; tail of output:", file=sys.stderr)
+        for line in tail_lines:
+            print(f"  {line}", file=sys.stderr)
+
     return result.returncode == 0
 
 
