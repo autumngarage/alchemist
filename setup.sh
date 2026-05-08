@@ -19,10 +19,10 @@ RESET='\033[0m'
 
 YES_MODE="${YES_MODE:-false}"
 
-info()  { printf "${BOLD}==> %s${RESET}\n" "$*"; }
-ok()    { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
-warn()  { printf "  ${YELLOW}!${RESET} %s\n" "$*"; }
-fail()  { printf "  ${RED}✗${RESET} %s\n" "$*"; }
+info() { printf "${BOLD}==> %s${RESET}\n" "$*"; }
+ok() { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
+warn() { printf "  ${YELLOW}!${RESET} %s\n" "$*"; }
+fail() { printf "  ${RED}✗${RESET} %s\n" "$*"; }
 
 DEPS_ONLY=false
 GIT_WORKFLOW="git"
@@ -34,9 +34,15 @@ fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --deps-only) DEPS_ONLY=true; shift ;;
-    --skip-devtools) SKIP_DEVTOOLS=true; shift ;;
-    -h|--help)
+    --deps-only)
+      DEPS_ONLY=true
+      shift
+      ;;
+    --skip-devtools)
+      SKIP_DEVTOOLS=true
+      shift
+      ;;
+    -h | --help)
       echo "Usage: bash setup.sh [--deps-only] [--skip-devtools]"
       echo ""
       echo "  --deps-only       Reinstall project deps (also refreshes per-profile dev tools)"
@@ -44,7 +50,10 @@ while [ "$#" -gt 0 ]; do
       echo "                    Also honored via TOUCHSTONE_SKIP_DEVTOOLS=1"
       exit 0
       ;;
-    *) fail "Unknown argument: $1"; exit 1 ;;
+    *)
+      fail "Unknown argument: $1"
+      exit 1
+      ;;
   esac
 done
 
@@ -53,14 +62,16 @@ trim_config_value() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   value="${value%,}"
-  value="${value#\"}"; value="${value%\"}"
-  value="${value#\'}"; value="${value%\'}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
   printf '%s' "$value"
 }
 
 truthy() {
   case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes|on) return 0 ;;
+    true | 1 | yes | on) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -87,7 +98,7 @@ prompt_yes_no() {
   fi
 
   case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
-    y|yes|true|1|on) return 0 ;;
+    y | yes | true | 1 | on) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -110,7 +121,7 @@ load_touchstone_config() {
       git_workflow) GIT_WORKFLOW="$value" ;;
       gitbutler_mcp) GITBUTLER_MCP="$value" ;;
     esac
-  done < ".touchstone-config"
+  done <".touchstone-config"
 }
 
 PROJECT_NAME="$(basename "$(pwd)")"
@@ -119,353 +130,355 @@ printf "${BOLD}Setting up ${PROJECT_NAME}${RESET}\n"
 echo ""
 
 if [ "$DEPS_ONLY" = false ]; then
-load_touchstone_config
+  load_touchstone_config
 
-# --------------------------------------------------------------------------
-# 1. Homebrew (required foundation)
-# --------------------------------------------------------------------------
-info "Checking Homebrew"
-if command -v brew >/dev/null 2>&1; then
-  ok "brew installed"
-else
-  fail "Homebrew is required. Install from https://brew.sh"
-  exit 1
-fi
-
-# --------------------------------------------------------------------------
-# 2. Touchstone CLI
-# --------------------------------------------------------------------------
-info "Checking touchstone"
-if command -v touchstone >/dev/null 2>&1; then
-  TOUCHSTONE_VERSION_SUMMARY="$(touchstone version 2>&1 | awk 'NF && !seen { sub(/^touchstone /, ""); print; seen = 1 }')"
-  ok "touchstone ${TOUCHSTONE_VERSION_SUMMARY:-installed}"
-else
-  warn "Installing touchstone..."
-  brew tap autumngarage/touchstone 2>/dev/null || true
-  brew install touchstone
-  ok "touchstone installed"
-fi
-
-# --------------------------------------------------------------------------
-# 3. Dev tools (brew)
-# --------------------------------------------------------------------------
-info "Checking dev tools"
-
-brew_install_if_missing() {
-  local cmd="$1"
-  local formula="${2:-$1}"
-  if command -v "$cmd" >/dev/null 2>&1; then
-    ok "$cmd installed"
+  # --------------------------------------------------------------------------
+  # 1. Homebrew (required foundation)
+  # --------------------------------------------------------------------------
+  info "Checking Homebrew"
+  if command -v brew >/dev/null 2>&1; then
+    ok "brew installed"
   else
-    warn "Installing $formula..."
-    brew install "$formula" 2>/dev/null
-    ok "$cmd installed"
+    fail "Homebrew is required. Install from https://brew.sh"
+    exit 1
   fi
-}
 
-brew_install_if_missing "git"        "git"
-brew_install_if_missing "gh"         "gh"
-brew_install_if_missing "pre-commit" "pre-commit"
-brew_install_if_missing "gitleaks"   "gitleaks"
-brew_install_if_missing "shellcheck" "shellcheck"
-brew_install_if_missing "shfmt"      "shfmt"
+  # --------------------------------------------------------------------------
+  # 2. Touchstone CLI
+  # --------------------------------------------------------------------------
+  info "Checking touchstone"
+  if command -v touchstone >/dev/null 2>&1; then
+    TOUCHSTONE_VERSION_SUMMARY="$(touchstone version 2>&1 | awk 'NF && !seen { sub(/^touchstone /, ""); print; seen = 1 }')"
+    ok "touchstone ${TOUCHSTONE_VERSION_SUMMARY:-installed}"
+  else
+    warn "Installing touchstone..."
+    brew tap autumngarage/touchstone 2>/dev/null || true
+    brew install touchstone
+    ok "touchstone installed"
+  fi
 
-# --------------------------------------------------------------------------
-# 4. AI reviewer CLI (optional)
-# --------------------------------------------------------------------------
-info "Checking AI reviewer"
+  # --------------------------------------------------------------------------
+  # 3. Dev tools (brew)
+  # --------------------------------------------------------------------------
+  info "Checking dev tools"
 
-AI_REVIEW_ENABLED=true
-AI_REVIEWERS=()
-AI_REVIEWERS_CHECKED=""
-AI_LOCAL_REVIEW_COMMAND=""
-AI_CONDUCTOR_WITH=""
-AI_REVIEW_ROUTING_ENABLED=false
-AI_REVIEW_ROUTING_SMALL_MAX=400
-
-trim_review_value() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  value="${value%,}"
-  value="${value#\"}"; value="${value%\"}"
-  value="${value#\'}"; value="${value%\'}"
-  printf '%s' "$value"
-}
-
-add_reviewers_from_csv() {
-  local csv="$1" item
-  local -a items=()
-  csv="$(trim_review_value "$csv")"
-  csv="${csv#\[}"
-  csv="${csv%\]}"
-  IFS=',' read -r -a items <<< "$csv"
-  for item in "${items[@]}"; do
-    item="$(trim_review_value "$item")"
-    [ -n "$item" ] && AI_REVIEWERS+=("$item")
-  done
-}
-
-load_ai_review_config() {
-  local section="" line key value
-
-  [ -f ".codex-review.toml" ] || {
-    AI_REVIEWERS=("conductor")
-    return 0
+  brew_install_if_missing() {
+    local cmd="$1"
+    local formula="${2:-$1}"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      ok "$cmd installed"
+    else
+      warn "Installing $formula..."
+      brew install "$formula" 2>/dev/null
+      ok "$cmd installed"
+    fi
   }
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"
-    line="$(trim_review_value "$line")"
-    [ -z "$line" ] && continue
+  brew_install_if_missing "git" "git"
+  brew_install_if_missing "gh" "gh"
+  brew_install_if_missing "pre-commit" "pre-commit"
+  brew_install_if_missing "gitleaks" "gitleaks"
+  brew_install_if_missing "shellcheck" "shellcheck"
+  brew_install_if_missing "shfmt" "shfmt"
 
-    case "$line" in
-      \[*\])
-        section="${line#\[}"
-        section="${section%\]}"
-        continue
-        ;;
-    esac
+  # --------------------------------------------------------------------------
+  # 4. AI reviewer CLI (optional)
+  # --------------------------------------------------------------------------
+  info "Checking AI reviewer"
 
-    case "$line" in *=*) ;; *) continue ;; esac
-    key="$(trim_review_value "${line%%=*}")"
-    value="$(trim_review_value "${line#*=}")"
+  AI_REVIEW_ENABLED=true
+  AI_REVIEWERS=()
+  AI_REVIEWERS_CHECKED=""
+  AI_LOCAL_REVIEW_COMMAND=""
+  AI_CONDUCTOR_WITH=""
+  AI_REVIEW_ROUTING_ENABLED=false
+  AI_REVIEW_ROUTING_SMALL_MAX=400
 
-    if [ "$section" = "review" ]; then
-      case "$key" in
-        enabled) AI_REVIEW_ENABLED="$value" ;;
-        reviewer) [ -n "$value" ] && AI_REVIEWERS+=("$value") ;;
-        reviewers) add_reviewers_from_csv "${line#*=}" ;;
+  trim_review_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value%,}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    printf '%s' "$value"
+  }
+
+  add_reviewers_from_csv() {
+    local csv="$1" item
+    local -a items=()
+    csv="$(trim_review_value "$csv")"
+    csv="${csv#\[}"
+    csv="${csv%\]}"
+    IFS=',' read -r -a items <<<"$csv"
+    for item in "${items[@]}"; do
+      item="$(trim_review_value "$item")"
+      [ -n "$item" ] && AI_REVIEWERS+=("$item")
+    done
+  }
+
+  load_ai_review_config() {
+    local section="" line key value
+
+    [ -f ".codex-review.toml" ] || {
+      AI_REVIEWERS=("conductor")
+      return 0
+    }
+
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"
+      line="$(trim_review_value "$line")"
+      [ -z "$line" ] && continue
+
+      case "$line" in
+        \[*\])
+          section="${line#\[}"
+          section="${section%\]}"
+          continue
+          ;;
       esac
-    elif [ "$section" = "review.conductor" ]; then
-      case "$key" in
-        with) AI_CONDUCTOR_WITH="$value" ;;
-      esac
-    elif [ "$section" = "review.routing" ]; then
-      case "$key" in
-        enabled) AI_REVIEW_ROUTING_ENABLED="$value" ;;
-        small_max_diff_lines|small_diff_lines) AI_REVIEW_ROUTING_SMALL_MAX="$value" ;;
-        small_reviewers|large_reviewers) add_reviewers_from_csv "${line#*=}" ;;
-      esac
-    elif [ "$section" = "review.local" ]; then
-      case "$key" in
-        command) AI_LOCAL_REVIEW_COMMAND="$value" ;;
-      esac
+
+      case "$line" in *=*) ;; *) continue ;; esac
+      key="$(trim_review_value "${line%%=*}")"
+      value="$(trim_review_value "${line#*=}")"
+
+      if [ "$section" = "review" ]; then
+        case "$key" in
+          enabled) AI_REVIEW_ENABLED="$value" ;;
+          reviewer) [ -n "$value" ] && AI_REVIEWERS+=("$value") ;;
+          reviewers) add_reviewers_from_csv "${line#*=}" ;;
+        esac
+      elif [ "$section" = "review.conductor" ]; then
+        case "$key" in
+          with) AI_CONDUCTOR_WITH="$value" ;;
+        esac
+      elif [ "$section" = "review.routing" ]; then
+        case "$key" in
+          enabled) AI_REVIEW_ROUTING_ENABLED="$value" ;;
+          small_max_diff_lines | small_diff_lines) AI_REVIEW_ROUTING_SMALL_MAX="$value" ;;
+          small_reviewers | large_reviewers) add_reviewers_from_csv "${line#*=}" ;;
+        esac
+      elif [ "$section" = "review.local" ]; then
+        case "$key" in
+          command) AI_LOCAL_REVIEW_COMMAND="$value" ;;
+        esac
+      fi
+    done <".codex-review.toml"
+
+    if [ "${#AI_REVIEWERS[@]}" -eq 0 ] && [ "$AI_REVIEW_ENABLED" != "false" ]; then
+      AI_REVIEWERS=("conductor")
     fi
-  done < ".codex-review.toml"
+  }
 
-  if [ "${#AI_REVIEWERS[@]}" -eq 0 ] && [ "$AI_REVIEW_ENABLED" != "false" ]; then
-    AI_REVIEWERS=("conductor")
-  fi
-}
+  check_ai_reviewer() {
+    local reviewer="$1"
 
-check_ai_reviewer() {
-  local reviewer="$1"
+    case " $AI_REVIEWERS_CHECKED " in
+      *" $reviewer "*) return 0 ;;
+    esac
+    AI_REVIEWERS_CHECKED="$AI_REVIEWERS_CHECKED $reviewer"
 
-  case " $AI_REVIEWERS_CHECKED " in
-    *" $reviewer "*) return 0 ;;
-  esac
-  AI_REVIEWERS_CHECKED="$AI_REVIEWERS_CHECKED $reviewer"
-
-  case "$reviewer" in
-    conductor)
-      if command -v conductor >/dev/null 2>&1; then
-        if conductor doctor --json 2>/dev/null | grep -q '"configured"[[:space:]]*:[[:space:]]*true'; then
-          if [ -n "$AI_CONDUCTOR_WITH" ]; then
-            ok "conductor installed and configured (pinned provider: $AI_CONDUCTOR_WITH)"
+    case "$reviewer" in
+      conductor)
+        if command -v conductor >/dev/null 2>&1; then
+          if conductor doctor --json 2>/dev/null | grep -q '"configured"[[:space:]]*:[[:space:]]*true'; then
+            if [ -n "$AI_CONDUCTOR_WITH" ]; then
+              ok "conductor installed and configured (pinned provider: $AI_CONDUCTOR_WITH)"
+            else
+              ok "conductor installed and configured"
+            fi
           else
-            ok "conductor installed and configured"
+            warn "conductor installed but no provider is configured. Run: conductor init"
           fi
         else
-          warn "conductor installed but no provider is configured. Run: conductor init"
+          warn "conductor reviewer selected, but Conductor CLI is not installed. Run: brew install autumngarage/conductor/conductor && conductor init"
         fi
-      else
-        warn "conductor reviewer selected, but Conductor CLI is not installed. Run: brew install autumngarage/conductor/conductor && conductor init"
-      fi
-      ;;
-    codex)
-      if command -v codex >/dev/null 2>&1; then
-        if codex login status >/dev/null 2>&1; then
-          ok "codex installed and authenticated"
+        ;;
+      codex)
+        if command -v codex >/dev/null 2>&1; then
+          if codex login status >/dev/null 2>&1; then
+            ok "codex installed and authenticated"
+          else
+            warn "codex installed but not logged in. Run: codex login"
+          fi
+        elif command -v npm >/dev/null 2>&1; then
+          warn "Installing Codex CLI..."
+          npm install -g @openai/codex 2>/dev/null && ok "codex installed — run: codex login" || warn "codex install failed. Manual install: npm install -g @openai/codex"
         else
-          warn "codex installed but not logged in. Run: codex login"
+          warn "codex not installed. Install Node.js/npm first, then: npm install -g @openai/codex && codex login"
         fi
-      elif command -v npm >/dev/null 2>&1; then
-        warn "Installing Codex CLI..."
-        npm install -g @openai/codex 2>/dev/null && ok "codex installed — run: codex login" || warn "codex install failed. Manual install: npm install -g @openai/codex"
-      else
-        warn "codex not installed. Install Node.js/npm first, then: npm install -g @openai/codex && codex login"
-      fi
-      ;;
-    claude)
-      if command -v claude >/dev/null 2>&1; then
-        if claude auth status >/dev/null 2>&1; then
-          ok "claude installed and authenticated"
+        ;;
+      claude)
+        if command -v claude >/dev/null 2>&1; then
+          if claude auth status >/dev/null 2>&1; then
+            ok "claude installed and authenticated"
+          else
+            warn "claude installed but auth check failed. Authenticate Claude before relying on review."
+          fi
         else
-          warn "claude installed but auth check failed. Authenticate Claude before relying on review."
+          warn "claude reviewer selected, but Claude CLI is not installed."
         fi
-      else
-        warn "claude reviewer selected, but Claude CLI is not installed."
-      fi
-      ;;
-    gemini)
-      if command -v gemini >/dev/null 2>&1; then
-        if [ -n "${GEMINI_API_KEY:-}" ] || { command -v gcloud >/dev/null 2>&1 && gcloud auth print-access-token >/dev/null 2>&1; }; then
-          ok "gemini installed and authenticated"
+        ;;
+      gemini)
+        if command -v gemini >/dev/null 2>&1; then
+          if [ -n "${GEMINI_API_KEY:-}" ] || { command -v gcloud >/dev/null 2>&1 && gcloud auth print-access-token >/dev/null 2>&1; }; then
+            ok "gemini installed and authenticated"
+          else
+            warn "gemini installed but auth is not configured. Set GEMINI_API_KEY or authenticate gcloud."
+          fi
         else
-          warn "gemini installed but auth is not configured. Set GEMINI_API_KEY or authenticate gcloud."
+          warn "gemini reviewer selected, but Gemini CLI is not installed."
         fi
-      else
-        warn "gemini reviewer selected, but Gemini CLI is not installed."
-      fi
-      ;;
-    local)
-      if [ -n "$AI_LOCAL_REVIEW_COMMAND" ]; then
-        ok "local reviewer configured: $AI_LOCAL_REVIEW_COMMAND"
-      else
-        warn "local reviewer selected, but [review.local].command is empty in .codex-review.toml"
-      fi
-      ;;
-    *)
-      warn "unknown AI reviewer '$reviewer' in .codex-review.toml"
-      ;;
-  esac
-}
+        ;;
+      local)
+        if [ -n "$AI_LOCAL_REVIEW_COMMAND" ]; then
+          ok "local reviewer configured: $AI_LOCAL_REVIEW_COMMAND"
+        else
+          warn "local reviewer selected, but [review.local].command is empty in .codex-review.toml"
+        fi
+        ;;
+      *)
+        warn "unknown AI reviewer '$reviewer' in .codex-review.toml"
+        ;;
+    esac
+  }
 
-load_ai_review_config
-if [ "$AI_REVIEW_ENABLED" = "false" ]; then
-  ok "AI review disabled in .codex-review.toml"
-else
-  if truthy "$AI_REVIEW_ROUTING_ENABLED"; then
-    ok "review routing enabled — local/small-diff routes can use <= ${AI_REVIEW_ROUTING_SMALL_MAX} diff lines"
-  fi
-  for reviewer in "${AI_REVIEWERS[@]}"; do
-    check_ai_reviewer "$reviewer"
-  done
-fi
-
-# --------------------------------------------------------------------------
-# 5. Git workflow helpers (optional)
-# --------------------------------------------------------------------------
-info "Checking Git workflow"
-
-install_gitbutler_cli() {
-  local installer install_status
-
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "curl is required for the official GitButler installer."
-    return 1
-  fi
-
-  installer="$(mktemp -t gitbutler-install.XXXXXX)"
-  if curl -fsSL https://gitbutler.com/install.sh -o "$installer"; then
-    sh "$installer"
-    install_status=$?
-    rm -f "$installer"
-    return "$install_status"
+  load_ai_review_config
+  if [ "$AI_REVIEW_ENABLED" = "false" ]; then
+    ok "AI review disabled in .codex-review.toml"
   else
-    rm -f "$installer"
-    return 1
-  fi
-}
-
-configure_gitbutler_mcp() {
-  if ! truthy "$GITBUTLER_MCP"; then
-    return 0
+    if truthy "$AI_REVIEW_ROUTING_ENABLED"; then
+      ok "review routing enabled — local/small-diff routes can use <= ${AI_REVIEW_ROUTING_SMALL_MAX} diff lines"
+    fi
+    for reviewer in "${AI_REVIEWERS[@]}"; do
+      check_ai_reviewer "$reviewer"
+    done
   fi
 
-  if ! command -v claude >/dev/null 2>&1; then
-    warn "GitButler MCP requested, but Claude Code is not installed. Later: claude mcp add gitbutler but mcp"
-    return 0
-  fi
+  # --------------------------------------------------------------------------
+  # 5. Git workflow helpers (optional)
+  # --------------------------------------------------------------------------
+  info "Checking Git workflow"
 
-  if claude mcp list 2>/dev/null | grep -q '^gitbutler:'; then
-    ok "GitButler MCP already configured for Claude Code"
-    return 0
-  fi
+  install_gitbutler_cli() {
+    local installer install_status
 
-  warn "GitButler MCP lets AI agents ask GitButler to record branches/savepoints."
-  if [ -t 0 ] && prompt_yes_no "Add GitButler MCP to Claude Code now?" "false"; then
-    claude mcp add gitbutler but mcp >/dev/null 2>&1 && ok "GitButler MCP added" || warn "GitButler MCP setup failed. Later: claude mcp add gitbutler but mcp"
-  else
-    warn "Later: claude mcp add gitbutler but mcp"
-  fi
-}
+    if ! command -v curl >/dev/null 2>&1; then
+      warn "curl is required for the official GitButler installer."
+      return 1
+    fi
 
-if [ "$GIT_WORKFLOW" = "gitbutler" ]; then
-  ok "GitButler selected — useful for stacked branches, parallel work, undo history, and AI-agent savepoints"
-  if command -v but >/dev/null 2>&1; then
-    ok "but installed"
-    if [ "$(git config --get touchstone.gitbutlerSetup 2>/dev/null || true)" = "configured" ]; then
-      ok "GitButler setup already recorded for this clone"
-    elif [ -t 0 ]; then
-      warn "Run 'but setup' once to let GitButler manage this repo. Undo later with: but teardown"
-      if prompt_yes_no "Run 'but setup' now?" "false"; then
-        if but setup; then
-          git config touchstone.gitbutlerSetup configured
-          ok "GitButler repo setup complete"
-        else
-          warn "GitButler setup failed. Later: but setup"
-        fi
-      else
-        warn "Later: but setup"
-      fi
+    installer="$(mktemp -t gitbutler-install.XXXXXX)"
+    if curl -fsSL https://gitbutler.com/install.sh -o "$installer"; then
+      sh "$installer"
+      install_status=$?
+      rm -f "$installer"
+      return "$install_status"
     else
-      warn "GitButler selected. Run once when ready: but setup"
+      rm -f "$installer"
+      return 1
     fi
-    configure_gitbutler_mcp
+  }
+
+  configure_gitbutler_mcp() {
+    if ! truthy "$GITBUTLER_MCP"; then
+      return 0
+    fi
+
+    if ! command -v claude >/dev/null 2>&1; then
+      warn "GitButler MCP requested, but Claude Code is not installed. Later: claude mcp add gitbutler but mcp"
+      return 0
+    fi
+
+    if claude mcp list 2>/dev/null | grep -q '^gitbutler:'; then
+      ok "GitButler MCP already configured for Claude Code"
+      return 0
+    fi
+
+    warn "GitButler MCP lets AI agents ask GitButler to record branches/savepoints."
+    if [ -t 0 ] && prompt_yes_no "Add GitButler MCP to Claude Code now?" "false"; then
+      claude mcp add gitbutler but mcp >/dev/null 2>&1 && ok "GitButler MCP added" || warn "GitButler MCP setup failed. Later: claude mcp add gitbutler but mcp"
+    else
+      warn "Later: claude mcp add gitbutler but mcp"
+    fi
+  }
+
+  if [ "$GIT_WORKFLOW" = "gitbutler" ]; then
+    ok "GitButler selected — useful for stacked branches, parallel work, undo history, and AI-agent savepoints"
+    if command -v but >/dev/null 2>&1; then
+      ok "but installed"
+      if [ "$(git config --get touchstone.gitbutlerSetup 2>/dev/null || true)" = "configured" ]; then
+        ok "GitButler setup already recorded for this clone"
+      elif [ -t 0 ]; then
+        warn "Run 'but setup' once to let GitButler manage this repo. Undo later with: but teardown"
+        if prompt_yes_no "Run 'but setup' now?" "false"; then
+          if but setup; then
+            git config touchstone.gitbutlerSetup configured
+            ok "GitButler repo setup complete"
+          else
+            warn "GitButler setup failed. Later: but setup"
+          fi
+        else
+          warn "Later: but setup"
+        fi
+      else
+        warn "GitButler selected. Run once when ready: but setup"
+      fi
+      configure_gitbutler_mcp
+    else
+      warn "GitButler selected, but 'but' CLI is not installed."
+      warn "GitButler CLI install: curl -fsSL https://gitbutler.com/install.sh | sh"
+      if [ -t 0 ] && prompt_yes_no "Run the official GitButler CLI installer now?" "false"; then
+        install_gitbutler_cli && ok "GitButler installer finished" || warn "GitButler install failed"
+      fi
+    fi
   else
-    warn "GitButler selected, but 'but' CLI is not installed."
-    warn "GitButler CLI install: curl -fsSL https://gitbutler.com/install.sh | sh"
-    if [ -t 0 ] && prompt_yes_no "Run the official GitButler CLI installer now?" "false"; then
-      install_gitbutler_cli && ok "GitButler installer finished" || warn "GitButler install failed"
-    fi
+    ok "plain Git workflow selected"
   fi
-else
-  ok "plain Git workflow selected"
-fi
 
-# --------------------------------------------------------------------------
-# 6. Sync touchstone files to latest
-# --------------------------------------------------------------------------
-info "Syncing touchstone files"
-# Skip update if this IS the Touchstone repo (it's the source, not a downstream project).
-if [ -f "bin/touchstone" ] && [ -f "lib/auto-update.sh" ]; then
-  ok "this is the Touchstone repo — skipping self-update"
-elif [ -f ".touchstone-version" ]; then
-  touchstone update --check 2>&1 | grep -E "Already|Needs sync|Run: touchstone update" | head -5 | while read -r line; do
-    ok "$line"
-  done
-  ok "touchstone sync status checked"
-else
-  warn "No .touchstone-version found — this project hasn't been bootstrapped."
-  warn "Run: touchstone new $(pwd)"
-fi
+  # --------------------------------------------------------------------------
+  # 6. Sync touchstone files to latest
+  # --------------------------------------------------------------------------
+  info "Syncing touchstone files"
+  # Skip update if this IS the Touchstone repo (it's the source, not a downstream project).
+  if [ -f "bin/touchstone" ] && [ -f "lib/auto-update.sh" ]; then
+    ok "this is the Touchstone repo — skipping self-update"
+  elif [ -f ".touchstone-version" ]; then
+    touchstone update --check 2>&1 | grep -E "Already|Needs sync|Run: touchstone update" | head -5 | while read -r line; do
+      ok "$line"
+    done
+    ok "touchstone sync status checked"
+  else
+    warn "No .touchstone-version found — this project hasn't been bootstrapped."
+    warn "Run: touchstone new $(pwd)"
+  fi
 
-# --------------------------------------------------------------------------
-# 7. Pre-commit hooks
-# --------------------------------------------------------------------------
-info "Setting up git hooks"
-if [ -f ".pre-commit-config.yaml" ]; then
-  # Clear core.hooksPath if set — it conflicts with pre-commit.
-  git config --unset-all core.hooksPath 2>/dev/null || true
-  # Install hook shims (environments install lazily on first run).
-  pre-commit install 2>&1 | tail -1 | while read -r line; do ok "$line"; done
-  pre-commit install --hook-type pre-push 2>&1 | tail -1 | while read -r line; do ok "$line"; done
-  ok "pre-commit hooks installed (pre-commit, pre-push)"
-else
-  warn "No .pre-commit-config.yaml found — skipping hooks"
-fi
+  # --------------------------------------------------------------------------
+  # 7. Pre-commit hooks
+  # --------------------------------------------------------------------------
+  info "Setting up git hooks"
+  if [ -f ".pre-commit-config.yaml" ]; then
+    # Clear core.hooksPath if set — it conflicts with pre-commit.
+    git config --unset-all core.hooksPath 2>/dev/null || true
+    # Install hook shims (environments install lazily on first run).
+    pre-commit install 2>&1 | tail -1 | while read -r line; do ok "$line"; done
+    pre-commit install --hook-type pre-push 2>&1 | tail -1 | while read -r line; do ok "$line"; done
+    ok "pre-commit hooks installed (pre-commit, pre-push)"
+  else
+    warn "No .pre-commit-config.yaml found — skipping hooks"
+  fi
 
-# --------------------------------------------------------------------------
-# 8. gh CLI auth check
-# --------------------------------------------------------------------------
-info "Checking GitHub auth"
-if gh auth status 2>&1 | grep -q "Logged in"; then
-  ok "gh authenticated"
-else
-  warn "gh not authenticated. Run: gh auth login"
-fi
+  # --------------------------------------------------------------------------
+  # 8. gh CLI auth check
+  # --------------------------------------------------------------------------
+  info "Checking GitHub auth"
+  if gh auth status 2>&1 | grep -q "Logged in"; then
+    ok "gh authenticated"
+  else
+    warn "gh not authenticated. Run: gh auth login"
+  fi
 
 fi
 
@@ -605,11 +618,11 @@ load_touchstone_config() {
     key="$(trim "${line%%=*}")"
     value="$(trim "${line#*=}")"
     case "$key" in
-      project_type|profile) CONFIG_PROJECT_TYPE="$value" ;;
+      project_type | profile) CONFIG_PROJECT_TYPE="$value" ;;
       package_manager) CONFIG_PACKAGE_MANAGER="$value" ;;
       targets) CONFIG_TARGETS="$value" ;;
     esac
-  done < ".touchstone-config"
+  done <".touchstone-config"
 }
 
 detect_node_package_manager() {
@@ -694,7 +707,7 @@ install_node_dependencies() {
         warn "$label uses bun, but bun is not installed."
       fi
       ;;
-    npm|*)
+    npm | *)
       if command -v npm >/dev/null 2>&1; then
         (cd "$project_dir" && npm install) 2>&1 | tail -1 | while read -r line; do ok "$label dependencies installed: $line"; done
       else
@@ -776,13 +789,16 @@ install_profile_dependencies() {
   fi
 
   case "$profile" in
-    node|typescript|ts) install_node_dependencies "$label" "$project_dir" "$CONFIG_PACKAGE_MANAGER" ;;
+    node | typescript | ts) install_node_dependencies "$label" "$project_dir" "$CONFIG_PACKAGE_MANAGER" ;;
     python) install_python_dependencies "$label" "$project_dir" ;;
     rust) install_rust_dependencies "$label" "$project_dir" ;;
     swift) install_swift_dependencies "$label" "$project_dir" ;;
     go) install_go_dependencies "$label" "$project_dir" ;;
-    generic|"") return 1 ;;
-    *) warn "Unknown project_type '$profile' in .touchstone-config"; return 1 ;;
+    generic | "") return 1 ;;
+    *)
+      warn "Unknown project_type '$profile' in .touchstone-config"
+      return 1
+      ;;
   esac
 }
 
@@ -794,7 +810,7 @@ install_configured_targets() {
 
   [ -n "$CONFIG_TARGETS" ] || return 1
 
-  IFS=',' read -r -a target_entries <<< "$CONFIG_TARGETS"
+  IFS=',' read -r -a target_entries <<<"$CONFIG_TARGETS"
   for entry in "${target_entries[@]}"; do
     entry="$(trim "$entry")"
     [ -z "$entry" ] && continue
@@ -934,7 +950,7 @@ install_profile_devtools() {
       info "Checking Rust dev tools${label:+ ($label)}"
       install_rust_devtools
       ;;
-    python|node|typescript|ts|generic|"")
+    python | node | typescript | ts | generic | "")
       : # python/node own their ecosystems via requirements.txt / package.json; generic is a no-op.
       ;;
     *)
@@ -949,7 +965,7 @@ install_configured_target_devtools() {
 
   [ -n "$CONFIG_TARGETS" ] || return 0
 
-  IFS=',' read -r -a target_entries <<< "$CONFIG_TARGETS"
+  IFS=',' read -r -a target_entries <<<"$CONFIG_TARGETS"
   for entry in "${target_entries[@]}"; do
     entry="$(trim "$entry")"
     [ -z "$entry" ] && continue
