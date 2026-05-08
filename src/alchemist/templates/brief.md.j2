@@ -26,8 +26,8 @@ These are the project's conventions and constraints. Follow them. Anything you d
 Read the issue, gather **enough** context to do a good job, and then do the
 work. "Enough" varies by issue — match effort to scope:
 
-- **Trivial fix** (typo, missing newline, README clarification): just edit. No
-  exploration needed.
+- **Trivial fix** (typo, missing newline, README clarification): read the
+  target file to find the exact location, then make the smallest change.
 - **Bug fix in code**: read `CLAUDE.md` and/or `AGENTS.md` first to understand
   this project's conventions. Trace the affected code path. Check tests if any
   exist.
@@ -48,6 +48,8 @@ anything.
 ## Constraints
 
 - Match the existing code style. Convention beats consistency-with-yourself.
+- If the issue references a specific file or location, read that file before
+  editing it.
 - Make the smallest change that fixes the problem.
 - Do not modify `.github/`, `.cortex/`, `.codex-review.toml`, `homebrew-*`, or
   other infra/meta files unless the issue explicitly asks for it.
