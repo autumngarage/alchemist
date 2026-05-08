@@ -619,9 +619,11 @@ def test_assignee_failure_does_not_block_run(
 
 
 def test_token_never_appears_in_git_urls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """The GITHUB_TOKEN must never be embedded in URLs passed to git, because
-    git prints those URLs on stdout/stderr and persists them to .git/config.
-    Auth must come via the `-c http.extraheader` flag instead."""
+    """The GITHUB_TOKEN must never appear cleartext in URLs passed to git,
+    because git prints URLs on stdout/stderr and persists them to .git/config.
+    Auth must come via `-c http.extraheader=Authorization: Basic <encoded>`
+    instead — the encoded value is base64 of `x-access-token:<token>`, so
+    the raw token must never show up in any non-header argument."""
     # Use a recognizable fake token.
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_TESTLEAK0123456789abcdef")
     captured = _stub_all_external(monkeypatch)
@@ -633,13 +635,14 @@ def test_token_never_appears_in_git_urls(monkeypatch: pytest.MonkeyPatch, tmp_pa
     for cmd in captured["subprocess_run_args"]:
         for part in cmd:
             part_str = str(part)
-            # Token MAY appear inside the http.extraheader value (`-c
-            # http.extraheader=Authorization: Bearer ghp_...`) — that's the
-            # whole point. It must NOT appear in any URL or other argument.
-            if "ghp_TESTLEAK" in part_str:
-                assert part_str.startswith("http.extraheader="), (
-                    f"token leaked into a non-header argument: {part_str!r}"
-                )
+            # Cleartext token must NOT appear anywhere — not even in the
+            # Authorization header, since we now base64 it. The encoded
+            # form (which contains the token bytes embedded in base64)
+            # is fine because it's not the literal "ghp_TESTLEAK..."
+            # string.
+            assert "ghp_TESTLEAK" not in part_str, (
+                f"raw token leaked into argument: {part_str!r}"
+            )
 
     # Belt-and-suspenders: explicitly verify no URL contains the token prefix.
     url_args = [
@@ -654,12 +657,18 @@ def test_token_never_appears_in_git_urls(monkeypatch: pytest.MonkeyPatch, tmp_pa
         )
 
 
-def test_git_auth_prefix_uses_bearer_header():
-    """Sanity check on the helper that builds the auth prefix."""
+def test_git_auth_prefix_uses_basic_header_with_x_access_token():
+    """The auth prefix uses HTTP Basic with `x-access-token:<token>` so it
+    works for both PATs and App installation tokens (GitHub's git endpoint
+    rejects Bearer for installation tokens)."""
+    import base64
+
     from alchemist.runner import _git_auth_prefix
-    prefix = _git_auth_prefix("ghp_test123")
+
+    prefix = _git_auth_prefix("ghs_install123")
     assert prefix[:2] == ["git", "-c"]
-    assert "http.extraheader=Authorization: Bearer ghp_test123" in prefix[2]
+    expected_encoded = base64.b64encode(b"x-access-token:ghs_install123").decode()
+    assert prefix[2] == f"http.extraheader=Authorization: Basic {expected_encoded}"
 
 
 # --------------------------------------------------------------------------- #
