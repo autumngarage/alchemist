@@ -86,9 +86,13 @@ def run_tick(config: Config) -> list[RunResult]:
     checks = run_doctor(config)
     failed = [c for c in checks if not c.ok]
     if failed:
-        names = ", ".join(c.name for c in failed)
+        # Include each failing check's detail so Railway logs surface what
+        # actually went wrong (e.g. "$GITHUB_TOKEN not set" vs a JWT mint
+        # error vs gh auth status's exit message). Without this we lose
+        # the diagnostic on a one-shot cron container.
+        details = "; ".join(f"{c.name}: {c.detail}" for c in failed)
         print(
-            f"alchemist: doctor failed ({names}); skipping tick",
+            f"alchemist: doctor failed; skipping tick — {details}",
             file=sys.stderr,
         )
         return []
