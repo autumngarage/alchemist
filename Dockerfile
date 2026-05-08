@@ -85,4 +85,4 @@ RUN mkdir -p /var/alchemist/state
 # creds are configured, else `$GITHUB_TOKEN` passthrough) and exports the
 # result for the rest of the tick. Doctor reads it from the environment
 # just like v0.1's PAT path. See alchemist#6.
-CMD ["bash", "-c", "export GITHUB_TOKEN=$(alchemist auth-token) && alchemist doctor --json && alchemist scan --json"]
+CMD ["bash", "-c", "GITHUB_TOKEN=$(alchemist auth-token) && export GITHUB_TOKEN && alchemist doctor --json && alchemist scan --json"]

@@ -16,31 +16,9 @@ from alchemist.banner import (
     SUBTITLE_TAGLINE,
     print_banner,
 )
-from alchemist.config import Config, load_config
+from alchemist.config import load_config
 from alchemist.doctor import run_doctor
 from alchemist.scanner import ScanError, scan
-
-
-def _resolve_github_token(config: Config) -> str | None:
-    """Return the token alchemist should expose as GITHUB_TOKEN this tick.
-
-    With App credentials: mints a fresh installation token.
-    Without: passes through `$GITHUB_TOKEN` (or whatever `github_token_env`
-    points at) for backwards compat with v0.1 PAT deployments.
-
-    Raises AuthTokenError when App creds are present but minting fails — the
-    caller surfaces this; we do not silently fall through to the PAT, since
-    misconfigured App creds should be loud.
-    """
-    if not config.has_app_credentials:
-        return config.github_token
-    private_key = config.resolve_app_private_key()
-    minted = mint_installation_token(
-        app_id=config.app_id or "",
-        private_key_pem=private_key,
-        installation_id=config.app_installation_id or "",
-    )
-    return minted.token
 
 
 @click.group(invoke_without_command=False)
