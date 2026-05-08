@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -16,9 +17,36 @@ from alchemist.banner import (
     SUBTITLE_TAGLINE,
     print_banner,
 )
-from alchemist.config import load_config
+from alchemist.config import Config, load_config
 from alchemist.doctor import run_doctor
 from alchemist.scanner import ScanError, scan
+
+
+def _resolve_github_token(config: Config) -> str | None:
+    """Mint a GitHub App installation token (or pass through the PAT) and
+    populate `$GITHUB_TOKEN` in this process's environment.
+
+    Every alchemist command that ends up shelling out to `gh` or `git push`
+    needs `GITHUB_TOKEN` set on the spawned subprocess. With App auth, the
+    token is minted fresh per command rather than sourced from a static
+    env var. Setting `os.environ` here lets the rest of the runner stay
+    auth-mechanism-agnostic — it just reads the env var like always.
+
+    Returns the token string (for callers that want to print it, like
+    `alchemist auth-token`) or None when no auth is configured at all.
+    Raises AuthTokenError / ValueError when App creds are configured but
+    the mint fails — fail loud rather than silently fall through.
+    """
+    if config.has_app_credentials:
+        private_key = config.resolve_app_private_key()
+        minted = mint_installation_token(
+            app_id=config.app_id or "",
+            private_key_pem=private_key,
+            installation_id=config.app_installation_id or "",
+        )
+        os.environ[config.github_token_env] = minted.token
+        return minted.token
+    return os.environ.get(config.github_token_env)
 
 
 @click.group(invoke_without_command=False)
@@ -42,6 +70,12 @@ def doctor(as_json: bool) -> None:
     config = load_config()
     if not as_json:
         print_banner(subtitle=SUBTITLE_DOCTOR, version=__version__)
+
+    # Mint and export the App installation token before running checks so
+    # the gh-auth probe sees it. Failures surface as a "github auth" check
+    # below rather than as an early raise.
+    with contextlib.suppress(AuthTokenError, ValueError):
+        _resolve_github_token(config)
 
     checks = run_doctor(config)
 
@@ -141,6 +175,13 @@ def run_once(as_json: bool) -> None:
     if not as_json:
         print_banner(subtitle=f"tick · {SUBTITLE_TAGLINE}", version=__version__)
 
+    # Mint and export the App installation token before run_tick so that
+    # run_doctor (and downstream `gh` / `git push` calls) see it. Mint
+    # failures fall through to the doctor check, which surfaces them with
+    # context — better than crashing the tick before doctor runs.
+    with contextlib.suppress(AuthTokenError, ValueError):
+        _resolve_github_token(config)
+
     results = run_tick(config)
 
     if as_json:
@@ -170,42 +211,27 @@ def run_once(as_json: bool) -> None:
 
 @main.command("auth-token")
 def auth_token_cmd() -> None:
-    """Print a GitHub token to stdout (mints from App creds, else passthrough).
+    """Print a GitHub token to stdout — debug helper for App auth setup.
 
-    Designed for shell composition at the cron entrypoint:
-
-        GITHUB_TOKEN=$(alchemist auth-token) alchemist run-once
-
-    Behavior:
-      - App creds set (id + installation + key) → mint a fresh installation
-        token and print it. Failure exits 1 with a clear message.
-      - App creds absent → echo `$GITHUB_TOKEN` (or whatever github_token_env
-        points at). Backwards-compat for v0.1 PAT deployments.
-      - Neither App creds nor PAT env var set → exit 1.
+    Mints an installation token from App credentials when configured;
+    otherwise echoes `$GITHUB_TOKEN` for the v0.1 PAT path. Production
+    cron firings don't need this — the runtime resolves auth internally
+    in `run-once` and `doctor`. This subcommand exists to verify creds
+    are wired up correctly without running a full tick.
     """
     config = load_config()
-    if config.has_app_credentials:
-        try:
-            private_key = config.resolve_app_private_key()
-            minted = mint_installation_token(
-                app_id=config.app_id or "",
-                private_key_pem=private_key,
-                installation_id=config.app_installation_id or "",
-            )
-        except (AuthTokenError, ValueError) as exc:
-            click.echo(f"alchemist auth-token: {exc}", err=True)
-            sys.exit(1)
-        click.echo(minted.token)
-        return
-
-    pat = os.environ.get(config.github_token_env)
-    if not pat:
+    try:
+        token = _resolve_github_token(config)
+    except (AuthTokenError, ValueError) as exc:
+        click.echo(f"alchemist auth-token: {exc}", err=True)
+        sys.exit(1)
+    if not token:
         click.echo(
             f"alchemist auth-token: no App credentials and ${config.github_token_env} unset",
             err=True,
         )
         sys.exit(1)
-    click.echo(pat)
+    click.echo(token)
 
 
 if __name__ == "__main__":  # pragma: no cover
