@@ -1016,10 +1016,18 @@ def _check_pr_merged(repo: str, pr_number: int) -> bool:
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # Use 'origin' (set to a plain URL by _clone_or_update) plus the auth
     # header — never embed the token in the URL. See _git_auth_prefix.
+    #
+    # `--force-with-lease`: alchemist owns its branch namespace
+    # (`alchemist/issue-N-...`) and a previous tick may have left commits
+    # there from a closed PR or a Railway-killed mid-push. Force-pushing
+    # over our own work is correct; --with-lease refuses if the remote
+    # moved beneath us (which would mean concurrent activity we shouldn't
+    # overwrite — currently impossible since we hold the per-repo lock,
+    # but cheap insurance).
     _ = repo  # unused; origin already points at the right remote
     git_auth = _git_auth_prefix(token)
     subprocess.run(  # noqa: S603,S607
-        [*git_auth, "push", "--set-upstream", "origin", branch],
+        [*git_auth, "push", "--set-upstream", "--force-with-lease", "origin", branch],
         cwd=repo_dir, check=True, timeout=120,
     )
 
