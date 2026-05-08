@@ -69,7 +69,8 @@ def _fake_opener(
             return _Resp(json.dumps(payload).encode("utf-8"))
 
     opener = _Opener()
-    opener._captured = captured  # type: ignore[attr-defined] — test seam
+    # Test seam: stash the captured request on the opener so callers can assert.
+    opener._captured = captured  # type: ignore[attr-defined]
     return opener  # type: ignore[return-value]
 
 

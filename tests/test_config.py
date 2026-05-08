@@ -158,29 +158,28 @@ def test_app_credentials_loaded_from_env_with_inline_key(
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
     monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
     monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
-    monkeypatch.setenv(
-        "ALCHEMIST_APP_PRIVATE_KEY",
-        "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
-    )
+    # Sentinel string instead of a real-looking PEM so the detect-private-key
+    # pre-commit hook doesn't flag this fixture.
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "PEM_PLACEHOLDER")
     cfg = load_config()
     assert cfg.app_id == "3628230"
     assert cfg.app_installation_id == "130170611"
     assert cfg.has_app_credentials is True
-    assert cfg.resolve_app_private_key().startswith("-----BEGIN PRIVATE KEY-----")
+    assert cfg.resolve_app_private_key() == "PEM_PLACEHOLDER"
 
 
 def test_app_credentials_via_path_reads_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     key_file = tmp_path / "app.pem"
-    key_file.write_text("-----BEGIN PRIVATE KEY-----\nfromdisk\n-----END PRIVATE KEY-----")
+    key_file.write_text("PEM_FROMDISK_PLACEHOLDER")
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
     monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
     monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
     monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY_PATH", str(key_file))
     cfg = load_config()
     assert cfg.has_app_credentials is True
-    assert "fromdisk" in cfg.resolve_app_private_key()
+    assert "FROMDISK" in cfg.resolve_app_private_key()
 
 
 def test_has_app_credentials_requires_all_three(
