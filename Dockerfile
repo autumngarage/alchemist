@@ -77,12 +77,7 @@ RUN pipx install . \
 # Persistent state lives outside the image; Railway mounts a volume here.
 RUN mkdir -p /var/alchemist/state
 
-# Default to a single tick: doctor, then scan in JSON. The transmute loop
-# (`alchemist run-once`) replaces this in v0.1 once the cron + auth path is
-# verified and dry-run mode covers the agent-loop side.
-#
-# The `auth-token` wrapper resolves auth (App installation token if App
-# creds are configured, else `$GITHUB_TOKEN` passthrough) and exports the
-# result for the rest of the tick. Doctor reads it from the environment
-# just like v0.1's PAT path. See alchemist#6.
-CMD ["bash", "-c", "GITHUB_TOKEN=$(alchemist auth-token) && export GITHUB_TOKEN && alchemist doctor --json && alchemist scan --json"]
+# Default to a single tick: doctor, then scan in JSON. Auth (App installation
+# token vs PAT) is resolved internally by alchemist's CLI commands themselves,
+# so this CMD does not need a shell wrapper. See alchemist#6.
+CMD ["bash", "-c", "alchemist doctor --json && alchemist scan --json"]

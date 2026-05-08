@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from click.testing import CliRunner
 
@@ -71,6 +73,76 @@ def test_auth_token_mints_when_app_creds_present(
     result = runner.invoke(main, ["auth-token"])
     assert result.exit_code == 0
     assert result.output.strip() == "ghs_minted"
+
+
+def test_run_once_sets_minted_token_in_env_for_subprocess_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """run-once must export the minted installation token so `gh` and
+    `git push` see it. Regression guard: relying on an external shell
+    wrapper bit us in alchemist#6 when railway.json's startCommand
+    overrode the Dockerfile CMD.
+    """
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "fake-pem")
+    monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
+
+    from alchemist.auth_token import InstallationToken
+
+    monkeypatch.setattr(
+        "alchemist.cli.mint_installation_token",
+        lambda **_: InstallationToken(
+            token="ghs_minted_in_run_once", expires_at="2030-01-01T00:00:00Z"
+        ),
+    )
+
+    captured: dict[str, str | None] = {}
+
+    def _fake_run_tick(config):
+        captured["GITHUB_TOKEN"] = os.environ.get("GITHUB_TOKEN")
+        return []
+
+    monkeypatch.setattr("alchemist.runner.run_tick", _fake_run_tick)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run-once", "--json"])
+    assert result.exit_code == 0
+    assert captured["GITHUB_TOKEN"] == "ghs_minted_in_run_once"
+
+
+def test_doctor_sets_minted_token_in_env_before_checks_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "fake-pem")
+    monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
+
+    from alchemist.auth_token import InstallationToken
+
+    monkeypatch.setattr(
+        "alchemist.cli.mint_installation_token",
+        lambda **_: InstallationToken(
+            token="ghs_minted_in_doctor", expires_at="2030-01-01T00:00:00Z"
+        ),
+    )
+
+    seen: dict[str, str | None] = {}
+
+    def _fake_run_doctor(config):
+        seen["GITHUB_TOKEN"] = os.environ.get("GITHUB_TOKEN")
+        from alchemist.doctor import Check
+        return [Check(name="github auth", ok=True, detail="stub")]
+
+    monkeypatch.setattr("alchemist.cli.run_doctor", _fake_run_doctor)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 0
+    assert seen["GITHUB_TOKEN"] == "ghs_minted_in_doctor"
 
 
 def test_banner_subcommand_prints_attribution():
