@@ -41,9 +41,42 @@ class Config:
     assignee_user: str  # GitHub username/login to assign to claimed issues
     repo_blocklist: tuple[str, ...]  # repos in the org to skip even if labelled
 
+    # GitHub App auth (v0.2 / alchemist#6). When all three are present alchemist
+    # mints a per-tick installation token; otherwise it falls back to the PAT
+    # in `github_token_env`. Either app_private_key (PEM contents, suited to
+    # Railway env vars) or app_private_key_path (filesystem path, suited to
+    # local dev) supplies the signing key.
+    app_id: str | None
+    app_installation_id: str | None
+    app_private_key: str | None
+    app_private_key_path: Path | None
+
     @property
     def github_token(self) -> str | None:
         return os.environ.get(self.github_token_env)
+
+    @property
+    def has_app_credentials(self) -> bool:
+        return bool(
+            self.app_id
+            and self.app_installation_id
+            and (self.app_private_key or self.app_private_key_path)
+        )
+
+    def resolve_app_private_key(self) -> str:
+        """Return the App private key PEM contents, reading from disk if needed.
+
+        Raises ValueError when no key is configured or the path is unreadable.
+        """
+        if self.app_private_key:
+            return self.app_private_key
+        if self.app_private_key_path is None:
+            raise ValueError("no App private key configured")
+        path = self.app_private_key_path.expanduser()
+        try:
+            return path.read_text()
+        except OSError as exc:
+            raise ValueError(f"cannot read App private key at {path}: {exc}") from exc
 
 
 _DEFAULTS: dict[str, object] = {
@@ -81,6 +114,11 @@ _DEFAULTS: dict[str, object] = {
     # touch. Stored as a tuple in the resolved Config; the env-var override
     # is comma-separated.
     "repo_blocklist": "",
+    # GitHub App auth — empty by default; v0.2 deployments fill these in.
+    "app_id": "",
+    "app_installation_id": "",
+    "app_private_key": "",
+    "app_private_key_path": "",
 }
 
 
@@ -169,6 +207,10 @@ def load_config() -> Config:
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
         "ALCHEMIST_ASSIGNEE": "assignee_user",
         "ALCHEMIST_REPO_BLOCKLIST": "repo_blocklist",
+        "ALCHEMIST_APP_ID": "app_id",
+        "ALCHEMIST_APP_INSTALLATION_ID": "app_installation_id",
+        "ALCHEMIST_APP_PRIVATE_KEY": "app_private_key",
+        "ALCHEMIST_APP_PRIVATE_KEY_PATH": "app_private_key_path",
     }
     for env_name, key in env_overrides.items():
         if env_name in os.environ:
@@ -190,5 +232,13 @@ def load_config() -> Config:
         assignee_user=str(merged["assignee_user"]),
         repo_blocklist=_coerce_repo_blocklist(
             merged["repo_blocklist"], str(merged["org"])
+        ),
+        app_id=str(merged["app_id"]).strip() or None,
+        app_installation_id=str(merged["app_installation_id"]).strip() or None,
+        app_private_key=str(merged["app_private_key"]) or None,
+        app_private_key_path=(
+            Path(str(merged["app_private_key_path"])).expanduser()
+            if str(merged["app_private_key_path"]).strip()
+            else None
         ),
     )

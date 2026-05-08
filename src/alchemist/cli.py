@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import click
 
 from alchemist import __version__
+from alchemist.auth_token import AuthTokenError, mint_installation_token
 from alchemist.banner import (
     SUBTITLE_DOCTOR,
     SUBTITLE_SCAN,
@@ -164,6 +166,46 @@ def run_once(as_json: bool) -> None:
         if r.error and not any(r.error.startswith(p) for p in benign_prefixes)
     ]
     sys.exit(1 if fatal else 0)
+
+
+@main.command("auth-token")
+def auth_token_cmd() -> None:
+    """Print a GitHub token to stdout (mints from App creds, else passthrough).
+
+    Designed for shell composition at the cron entrypoint:
+
+        GITHUB_TOKEN=$(alchemist auth-token) alchemist run-once
+
+    Behavior:
+      - App creds set (id + installation + key) → mint a fresh installation
+        token and print it. Failure exits 1 with a clear message.
+      - App creds absent → echo `$GITHUB_TOKEN` (or whatever github_token_env
+        points at). Backwards-compat for v0.1 PAT deployments.
+      - Neither App creds nor PAT env var set → exit 1.
+    """
+    config = load_config()
+    if config.has_app_credentials:
+        try:
+            private_key = config.resolve_app_private_key()
+            minted = mint_installation_token(
+                app_id=config.app_id or "",
+                private_key_pem=private_key,
+                installation_id=config.app_installation_id or "",
+            )
+        except (AuthTokenError, ValueError) as exc:
+            click.echo(f"alchemist auth-token: {exc}", err=True)
+            sys.exit(1)
+        click.echo(minted.token)
+        return
+
+    pat = os.environ.get(config.github_token_env)
+    if not pat:
+        click.echo(
+            f"alchemist auth-token: no App credentials and ${config.github_token_env} unset",
+            err=True,
+        )
+        sys.exit(1)
+    click.echo(pat)
 
 
 if __name__ == "__main__":  # pragma: no cover

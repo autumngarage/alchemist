@@ -25,6 +25,52 @@ def test_help_prints_subcommands():
     assert "scan" in result.output
     assert "doctor" in result.output
     assert "banner" in result.output
+    assert "auth-token" in result.output
+
+
+def test_auth_token_passes_through_pat_when_no_app_creds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake_pat")
+    runner = CliRunner()
+    result = runner.invoke(main, ["auth-token"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "ghp_fake_pat"
+
+
+def test_auth_token_exits_one_when_no_creds_at_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    runner = CliRunner()
+    result = runner.invoke(main, ["auth-token"])
+    assert result.exit_code == 1
+    assert "no App credentials" in result.output or "no App credentials" in (
+        result.stderr if result.stderr_bytes else ""
+    )
+
+
+def test_auth_token_mints_when_app_creds_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "fake-pem")
+
+    from alchemist.auth_token import InstallationToken
+
+    def _fake_mint(*, app_id, private_key_pem, installation_id):
+        assert app_id == "3628230"
+        assert installation_id == "130170611"
+        assert private_key_pem == "fake-pem"
+        return InstallationToken(token="ghs_minted", expires_at="2030-01-01T00:00:00Z")
+
+    monkeypatch.setattr("alchemist.cli.mint_installation_token", _fake_mint)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["auth-token"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "ghs_minted"
 
 
 def test_banner_subcommand_prints_attribution():
