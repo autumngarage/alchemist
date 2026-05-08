@@ -1,0 +1,10 @@
+# Allowlist of gitignored files to copy into spawned worktrees.
+# Patterns follow gitignore(5) semantics; git itself does the matching.
+# Uncomment what your project needs.
+
+# .env
+# .env.local
+# .env.*.local
+
+# .vscode/settings.json
+# .idea/
