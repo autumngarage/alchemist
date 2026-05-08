@@ -19,6 +19,7 @@ Alchemist owns ONLY:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
@@ -604,8 +605,15 @@ def _git_auth_prefix(token: str) -> list[str]:
       - any error message that includes the URL
     With `http.extraheader`, the auth ride-alongs only the in-process git
     invocation. The token never appears in stored config or printed URLs.
+
+    Uses HTTP Basic auth with `x-access-token:<token>` as the credential
+    pair. GitHub's git-over-HTTPS endpoint accepts Basic for both
+    classic/fine-grained PATs and App installation tokens; Bearer is
+    accepted for the API but not for git operations on installation
+    tokens. Basic works for everything.
     """
-    return ["git", "-c", f"http.extraheader=Authorization: Bearer {token}"]
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["git", "-c", f"http.extraheader=Authorization: Basic {encoded}"]
 
 
 def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> None:
