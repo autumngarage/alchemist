@@ -30,8 +30,16 @@ Create a fine-grained personal access token at https://github.com/settings/token
 - Contents: read-write
 - Metadata: read
 
-**Path B — GitHub App (v0.2-preview, cleaner long-term):**
-Use the existing `autumn-alchemist` App registration at https://github.com/apps/autumn-alchemist (or register your own clone). Install on the target org. Capture App ID + private key + installation ID. The runtime code path needs `alchemist auth-token` to mint installation tokens — that's tracked as alchemist#6 and not yet shipped. For v0.1, stay on Path A.
+**Path B — GitHub App (v0.2, cleaner long-term):**
+Use the existing `autumn-alchemist` App registration at https://github.com/apps/autumn-alchemist (or register your own clone). Install on the target org with these permissions: `issues:rw`, `pull_requests:rw`, `contents:rw`, `metadata:r`. Capture three values:
+
+- App ID (numeric, e.g. `3628230`) — top of the App settings page.
+- Installation ID (numeric, e.g. `130170611`) — visible in the URL after installing on your org: `https://github.com/organizations/<org>/settings/installations/<installation_id>`.
+- Private key (PEM contents) — generated once on the App settings page; download and stash it. You'll paste the PEM body into a Railway env var.
+
+Each Railway deployment scopes to one installation (one org). For multi-org operators, run multiple deployments.
+
+The runtime mints a fresh installation access token every tick (~1-hour TTL, but we don't cache across ticks — the cron entrypoint is `GITHUB_TOKEN=$(alchemist auth-token) alchemist run-once`). When App env vars are unset, alchemist falls back to Path A's PAT for backwards compat.
 
 ### 2. Get an OpenRouter API key
 
@@ -45,7 +53,18 @@ Create a key at https://openrouter.ai with at least $10 in credits (unlocks the 
 cd ~/Repos/alchemist
 railway init -n alchemist
 railway add --service alchemist-cron
+
+# --- Auth: pick Path A OR Path B, not both. ---
+# Path A: fine-grained PAT
 railway variable set GITHUB_TOKEN="$YOUR_PAT" --service alchemist-cron
+
+# Path B: GitHub App (recommended for production). The private-key env var
+# holds the PEM file's contents — Railway accepts multi-line values.
+railway variable set ALCHEMIST_APP_ID="3628230" --service alchemist-cron
+railway variable set ALCHEMIST_APP_INSTALLATION_ID="130170611" --service alchemist-cron
+railway variable set ALCHEMIST_APP_PRIVATE_KEY="$(cat ~/.config/alchemist/autumn-alchemist.private-key.pem)" --service alchemist-cron
+# ---
+
 railway variable set OPENROUTER_API_KEY="$YOUR_OR_KEY" --service alchemist-cron
 railway variable set ALCHEMIST_ORG="$YOUR_ORG" --service alchemist-cron
 
@@ -54,6 +73,8 @@ railway variable set ALCHEMIST_DRY_RUN=true --service alchemist-cron
 railway variable set ALCHEMIST_LABEL=alchemist-test --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
 ```
+
+To verify auth before deploying, run `alchemist auth-token` locally with the same env set — it prints either the minted installation token (Path B) or the PAT (Path A), and exits 1 if neither is configured.
 
 Optional but recommended:
 
@@ -197,7 +218,7 @@ gh auth refresh
 railway variable set GITHUB_TOKEN="$(gh auth token)" --service alchemist-cron
 ```
 
-For App path: regenerate the App's installation token (auto-rotates).
+For App path: nothing to rotate — installation tokens are minted fresh each tick from the App's private key. The only static secret is the private key itself; rotate it via the App settings page if it leaks, then update `ALCHEMIST_APP_PRIVATE_KEY` on Railway.
 
 ## Watching alchemist live
 

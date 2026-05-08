@@ -36,6 +36,10 @@ def _config(
         github_token_env="GITHUB_TOKEN",
         assignee_user="@me",
         repo_blocklist=repo_blocklist,
+        app_id=None,
+        app_installation_id=None,
+        app_private_key=None,
+        app_private_key_path=None,
     )
 
 

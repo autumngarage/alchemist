@@ -80,4 +80,9 @@ RUN mkdir -p /var/alchemist/state
 # Default to a single tick: doctor, then scan in JSON. The transmute loop
 # (`alchemist run-once`) replaces this in v0.1 once the cron + auth path is
 # verified and dry-run mode covers the agent-loop side.
-CMD ["bash", "-c", "alchemist doctor --json && alchemist scan --json"]
+#
+# The `auth-token` wrapper resolves auth (App installation token if App
+# creds are configured, else `$GITHUB_TOKEN` passthrough) and exports the
+# result for the rest of the tick. Doctor reads it from the environment
+# just like v0.1's PAT path. See alchemist#6.
+CMD ["bash", "-c", "export GITHUB_TOKEN=$(alchemist auth-token) && alchemist doctor --json && alchemist scan --json"]

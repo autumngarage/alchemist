@@ -132,7 +132,73 @@ def test_config_is_frozen():
         github_token_env="GITHUB_TOKEN",
         assignee_user="@me",
         repo_blocklist=(),
+        app_id=None,
+        app_installation_id=None,
+        app_private_key=None,
+        app_private_key_path=None,
     )
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):
         cfg.org = "mutated"  # type: ignore[misc]
+
+
+def test_app_credentials_unset_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    cfg = load_config()
+    assert cfg.app_id is None
+    assert cfg.app_installation_id is None
+    assert cfg.app_private_key is None
+    assert cfg.app_private_key_path is None
+    assert cfg.has_app_credentials is False
+
+
+def test_app_credentials_loaded_from_env_with_inline_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    monkeypatch.setenv(
+        "ALCHEMIST_APP_PRIVATE_KEY",
+        "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
+    )
+    cfg = load_config()
+    assert cfg.app_id == "3628230"
+    assert cfg.app_installation_id == "130170611"
+    assert cfg.has_app_credentials is True
+    assert cfg.resolve_app_private_key().startswith("-----BEGIN PRIVATE KEY-----")
+
+
+def test_app_credentials_via_path_reads_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    key_file = tmp_path / "app.pem"
+    key_file.write_text("-----BEGIN PRIVATE KEY-----\nfromdisk\n-----END PRIVATE KEY-----")
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY_PATH", str(key_file))
+    cfg = load_config()
+    assert cfg.has_app_credentials is True
+    assert "fromdisk" in cfg.resolve_app_private_key()
+
+
+def test_has_app_credentials_requires_all_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two of three env vars set → not enough; we don't half-mint."""
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_APP_ID", "3628230")
+    monkeypatch.setenv("ALCHEMIST_APP_INSTALLATION_ID", "130170611")
+    # No private key → falls back to PAT path.
+    cfg = load_config()
+    assert cfg.has_app_credentials is False
+
+
+def test_resolve_app_private_key_raises_when_unconfigured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    cfg = load_config()
+    with pytest.raises(ValueError):
+        cfg.resolve_app_private_key()

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from alchemist.auth_token import AuthTokenError, mint_installation_token
+
 if TYPE_CHECKING:
     from alchemist.config import Config
 
@@ -33,12 +35,39 @@ def _which_check(binary: str, install_hint: str) -> Check:
     return Check(name=binary, ok=False, detail=f"not on PATH — {install_hint}")
 
 
-def _gh_auth_check(token_env: str) -> Check:
-    if not os.environ.get(token_env):
+def _gh_auth_check(config: Config) -> Check:
+    """Verify alchemist can authenticate to GitHub.
+
+    Two paths: with App credentials we attempt a real installation-token mint
+    (proves app_id + private_key + installation_id all work). Without, we
+    fall through to `gh auth status` against `$GITHUB_TOKEN` — the v0.1 PAT
+    path. Either path puts a usable token into the environment for the rest
+    of the tick.
+    """
+    if config.has_app_credentials:
+        try:
+            private_key = config.resolve_app_private_key()
+        except ValueError as exc:
+            return Check(name="github auth", ok=False, detail=str(exc))
+        try:
+            minted = mint_installation_token(
+                app_id=config.app_id or "",
+                private_key_pem=private_key,
+                installation_id=config.app_installation_id or "",
+            )
+        except AuthTokenError as exc:
+            return Check(name="github auth", ok=False, detail=str(exc))
+        return Check(
+            name="github auth",
+            ok=True,
+            detail=f"app installation token (expires {minted.expires_at})",
+        )
+
+    if not os.environ.get(config.github_token_env):
         return Check(
             name="github auth",
             ok=False,
-            detail=f"${token_env} not set",
+            detail=f"${config.github_token_env} not set",
         )
     try:
         result = subprocess.run(  # noqa: S603,S607 — gh is on PATH; auth status takes no user input
@@ -121,7 +150,7 @@ def run_doctor(config: Config) -> list[Check]:
         _which_check("git", "git is required"),
         _which_check("conductor", "brew install autumngarage/conductor/conductor"),
         _which_check("touchstone", "brew install autumngarage/touchstone/touchstone"),
-        _gh_auth_check(config.github_token_env),
+        _gh_auth_check(config),
         _state_dir_check(config.state_dir),
         _touchstone_merge_pr_script_check(),
     ]
