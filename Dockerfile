@@ -57,14 +57,14 @@ RUN pip install --no-cache-dir pipx==1.7.1 uv==0.5.11
 # Touchstone: cloned at a pinned tag, exposed at $TOUCHSTONE_ROOT and on PATH.
 # Alchemist invokes $TOUCHSTONE_ROOT/scripts/codex-review.sh from the cloned
 # target-repo's root.
-RUN git clone --depth 1 --branch ${TOUCHSTONE_VERSION} \
+RUN git clone --depth 50 --branch ${TOUCHSTONE_VERSION} \
         https://github.com/autumngarage/touchstone.git ${TOUCHSTONE_ROOT} \
  && chmod +x ${TOUCHSTONE_ROOT}/bin/touchstone
 
 # Conductor: cloned from source at a pinned tag (it isn't published on PyPI
 # under the name `conductor`), then pipx-installed from the local checkout.
 # Mirrors the brew formula's install path.
-RUN git clone --depth 1 --branch ${CONDUCTOR_VERSION} \
+RUN git clone --depth 50 --branch ${CONDUCTOR_VERSION}
         https://github.com/autumngarage/conductor.git /opt/conductor \
  && pipx install /opt/conductor
 
@@ -72,6 +72,7 @@ RUN git clone --depth 1 --branch ${CONDUCTOR_VERSION} \
 WORKDIR /opt/alchemist
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY scripts ./scripts
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${ALCHEMIST_VERSION}
 RUN pipx install . \
  && rm -rf /root/.cache/pip /root/.cache/uv

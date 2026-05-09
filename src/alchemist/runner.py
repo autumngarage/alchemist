@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 from alchemist.briefs import BRIEF_TEMPLATE_VERSION, render_brief, render_pr_body
 from alchemist.doctor import run_doctor
 from alchemist.locks import LockBusyError, acquire
+from alchemist.reporter import report_tool_failure
 from alchemist.scanner import DispatchIssue, scan
 
 if TYPE_CHECKING:
@@ -272,6 +273,9 @@ def _process_locked(
             ndjson_path=ndjson_path,
         )
     except _ToolError as exc:
+        report_tool_failure(
+            config, "conductor", str(exc), repo_context=repo, issue_number=issue.number
+        )
         return _bail(repo, issue, started, config, f"conductor: {exc}")
 
     budget_problem = _check_budget(ndjson_path, config.default_budget)
@@ -1175,6 +1179,7 @@ def _result(
         elapsed_sec=time.monotonic() - started,
         dry_run=config.dry_run,
     )
+
 
 
 __all__ = [
