@@ -537,13 +537,6 @@ print_failed_checks_and_exit() {
   exit 1
 }
 
-review_output_has_concrete_findings() {
-  local output_file="$1"
-
-  [ -f "$output_file" ] || return 1
-  grep -Eq 'CODEX_REVIEW_BLOCKED|Conductor review found|blocking advisory finding|blocking finding|findings[" ]*[:=][" ]*[1-9]' "$output_file"
-}
-
 run_preflight_gate() {
   local base_ref="$1"
 
@@ -623,6 +616,7 @@ run_merge_review() {
       echo "       Run the reviewer cleanly once before using --bypass-with-disclosure." >&2
       exit 1
     fi
+    touchstone_emit_event review_bypass pr_number="$PR_NUMBER" head_sha="$pr_head_oid" reason="$BYPASS_REASON"
     print_bypass_banner
     record_bypass_comment
     return 0
@@ -722,6 +716,7 @@ run_merge_review() {
     CODEX_REVIEW_BRANCH_NAME="$pr_head_branch" \
     CODEX_REVIEW_FORCE=1 \
     CODEX_REVIEW_MODE=review-only \
+    CODEX_REVIEW_ON_ERROR=fail-closed \
     TOUCHSTONE_PREFLIGHT_ALREADY_RAN=1 \
     CODEX_REVIEW_SUMMARY_FILE="$REVIEW_SUMMARY_FILE" \
     bash "$REVIEW_SCRIPT" 2>&1 | tee "$review_output_file"
@@ -734,38 +729,10 @@ run_merge_review() {
     return 0
   fi
 
-  # Issue #182: when the merge-pr review fails (typically a routing-induced
-  # timeout — Ollama wedging on review-only on small diffs, etc.) AND the
-  # exact same HEAD already has a recorded clean review marker from a
-  # prior run, auto-promote to bypass-with-disclosure rather than refusing
-  # the merge. The marker proves the diff was reviewed cleanly; a failed
-  # second iteration is a stalled reviewer gate, exactly the case that
-  # principles/git-workflow.md documents `--bypass-with-disclosure` for.
-  # Without this auto-promotion, every operator hit by the routing bug
-  # has to invoke the bypass manually with a synthesized reason.
-  local current_merge_base
-  if current_merge_base="$(git merge-base "$default_base_ref" "$pr_head_oid" 2>/dev/null)" \
-    && branch_has_clean_review_marker "$pr_head_branch" "$pr_head_oid" "$current_merge_base"; then
-    if review_output_has_concrete_findings "$review_output_file"; then
-      echo "" >&2
-      echo "ERROR: Merge review returned concrete findings; refusing to auto-bypass with a prior clean marker." >&2
-      echo "       Fix the findings or use an explicit manual bypass with disclosure." >&2
-      rm -f "$review_output_file"
-      touchstone_emit_event review_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
-      TOUCHSTONE_MERGE_FAILURE_REASON="review-blocked"
-      return "$review_rc"
-    fi
-    echo "" >&2
-    echo "==> Merge review exited $review_rc, but a prior clean review marker is recorded for HEAD $pr_head_oid." >&2
-    echo "==> Auto-promoting to reviewer bypass with disclosure." >&2
-    BYPASS_REVIEW=true
-    BYPASS_REASON="merge-pr.sh final review iteration exited ${review_rc} (typically a routing-induced timeout); a prior clean review marker is recorded for HEAD ${pr_head_oid}, so this auto-bypass preserves the safety guarantee that the diff was reviewed cleanly at least once."
-    touchstone_emit_event review_bypass pr_number="$PR_NUMBER" head_sha="$pr_head_oid" reason="$BYPASS_REASON"
-    print_bypass_banner
-    record_bypass_comment
-    rm -f "$review_output_file"
-    return 0
-  fi
+  echo "" >&2
+  echo "ERROR: Merge review exited $review_rc; merge-gate review fails closed." >&2
+  echo "       Fix review findings or rerun after reviewer infrastructure recovers." >&2
+  echo "       Emergency bypass requires an explicit --bypass-with-disclosure reason and a matching prior clean review marker." >&2
 
   rm -f "$review_output_file"
   touchstone_emit_event review_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
