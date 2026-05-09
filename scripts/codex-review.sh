@@ -63,7 +63,7 @@
 #   CODEX_REVIEW_MAX_ITERATIONS       — fix loop cap (default: from config, or 3)
 #   CODEX_REVIEW_MAX_DIFF_LINES       — skip review if diff > this many lines (default: 5000)
 #   CODEX_REVIEW_CACHE_CLEAN          — cache exact-input clean reviews (default: true)
-#   CODEX_REVIEW_TIMEOUT              — wall-clock timeout per invocation in seconds (default: 300, 0=none)
+#   CODEX_REVIEW_TIMEOUT              — optional wall-clock timeout per invocation in seconds (default: 0, no Touchstone wrapper timeout)
 #   CODEX_REVIEW_ON_ERROR             — fail-open (default) or fail-closed
 #   CODEX_REVIEW_CONTEXT_MODE         — auto|full|bounded prompt context selection (default: auto)
 #   CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES — bounded-context diff line cap (default: 400)
@@ -226,13 +226,15 @@ if [ "${CODEX_REVIEW_TEST_SENTINEL_CONTEXT:-0}" = "1" ]; then
   exit 0
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOUCHSTONE_ROOT="${TOUCHSTONE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CONFIG_FILE="$REPO_ROOT/.codex-review.toml"
 cd "$REPO_ROOT"
 
-PREFLIGHT_SCRIPT="$REPO_ROOT/lib/preflight.sh"
+PREFLIGHT_SCRIPT="$TOUCHSTONE_ROOT/lib/preflight.sh"
 if [ -f "$PREFLIGHT_SCRIPT" ]; then
-  # shellcheck source=lib/preflight.sh
+  # shellcheck source=../lib/preflight.sh
   source "$PREFLIGHT_SCRIPT"
 fi
 
@@ -365,7 +367,7 @@ NO_AUTOFIX="${CODEX_REVIEW_NO_AUTOFIX:-false}"
 CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
 PREFLIGHT_REQUIRED=true
-REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-300}"
+REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-0}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
 REVIEWER_CASCADE=()
@@ -385,6 +387,7 @@ CONDUCTOR_PREFER=""
 CONDUCTOR_EFFORT=""
 CONDUCTOR_TAGS=""
 CONDUCTOR_EXCLUDE=""
+CONDUCTOR_EXCLUDE_CONFIGURED=false
 ROUTING_ENABLED=true
 ROUTING_SMALL_MAX_DIFF_LINES=400
 ROUTING_SMALL_REVIEWERS=() # legacy 1.x shape; retained for back-compat parsing
@@ -396,7 +399,7 @@ ROUTING_SMALL_EFFORT="minimal"
 ROUTING_SMALL_TAGS=""
 ROUTING_LARGE_WITH=""
 ROUTING_LARGE_PREFER="best"
-ROUTING_LARGE_EFFORT="max"
+ROUTING_LARGE_EFFORT="high"
 ROUTING_LARGE_TAGS=""
 ROUTING_DECISION="default"
 PROMPT_CONTEXT_MODE="${CODEX_REVIEW_CONTEXT_MODE:-auto}"
@@ -735,8 +738,8 @@ is_truthy() {
 # We do minimal TOML parsing in bash — just key = value pairs and string arrays.
 if [ -f "$CONFIG_FILE" ]; then
   # Source the TOML library
-  # shellcheck source=lib/toml.sh
-  source "$REPO_ROOT/lib/toml.sh"
+  # shellcheck source=../lib/toml.sh
+  source "$TOUCHSTONE_ROOT/lib/toml.sh"
 
   toml_config_callback() {
     local section="$1"
@@ -750,7 +753,10 @@ if [ -f "$CONFIG_FILE" ]; then
           effort) CONDUCTOR_EFFORT="${CONDUCTOR_EFFORT:-$(toml_unquote "$value")}" ;;
           tags) CONDUCTOR_TAGS="${CONDUCTOR_TAGS:-$(toml_normalize_array "$value")}" ;;
           with) CONDUCTOR_WITH="${CONDUCTOR_WITH:-$(toml_unquote "$value")}" ;;
-          exclude) CONDUCTOR_EXCLUDE="${CONDUCTOR_EXCLUDE:-$(toml_normalize_array "$value")}" ;;
+          exclude)
+            CONDUCTOR_EXCLUDE="${CONDUCTOR_EXCLUDE:-$(toml_normalize_array "$value")}"
+            CONDUCTOR_EXCLUDE_CONFIGURED=true
+            ;;
         esac
         ;;
       "review.routing")
@@ -893,7 +899,7 @@ if [ "${#REVIEWER_CASCADE[@]}" -gt 0 ]; then
     echo "        reviewer = \"conductor\"" >&2
     echo "        [review.conductor]" >&2
     echo "          prefer = \"best\"" >&2
-    echo "          effort = \"max\"" >&2
+    echo "          effort = \"high\"" >&2
     echo "    Update .codex-review.toml at your convenience. See CHANGELOG for details." >&2
   fi
 fi
@@ -949,9 +955,15 @@ fi
 # Env overrides for the conductor adapter (take precedence over .codex-review.toml).
 CONDUCTOR_WITH="${TOUCHSTONE_CONDUCTOR_WITH:-${CONDUCTOR_WITH:-}}"
 CONDUCTOR_PREFER="${TOUCHSTONE_CONDUCTOR_PREFER:-${CONDUCTOR_PREFER:-best}}"
-CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-${CONDUCTOR_EFFORT:-max}}"
+CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-${CONDUCTOR_EFFORT:-high}}"
 CONDUCTOR_TAGS="${TOUCHSTONE_CONDUCTOR_TAGS:-${CONDUCTOR_TAGS:-code-review}}"
-CONDUCTOR_EXCLUDE="${TOUCHSTONE_CONDUCTOR_EXCLUDE:-${CONDUCTOR_EXCLUDE:-}}"
+if [ -n "${TOUCHSTONE_CONDUCTOR_EXCLUDE+x}" ]; then
+  CONDUCTOR_EXCLUDE="$TOUCHSTONE_CONDUCTOR_EXCLUDE"
+elif [ "$CONDUCTOR_EXCLUDE_CONFIGURED" = true ]; then
+  CONDUCTOR_EXCLUDE="${CONDUCTOR_EXCLUDE:-}"
+else
+  CONDUCTOR_EXCLUDE="ollama"
+fi
 
 # --------------------------------------------------------------------------
 # Mode resolution
@@ -1247,6 +1259,21 @@ When in doubt, STOP and emit BLOCKED."
   echo "$policy"
 }
 
+build_preflight_review_policy() {
+  case "${DETERMINISTIC_PREFLIGHT_RESULT:-not-run}" in
+    passed*)
+      cat <<POLICY_EOF
+## Deterministic preflight
+
+Deterministic preflight already passed for this diff before the live review.
+Do not rerun the full preflight, the full \`tests/test-*.sh\` suite, or broad lint/build sweeps.
+Run focused commands only when needed to verify a specific suspected blocker that the preflight did not already cover.
+POLICY_EOF
+      ;;
+    *) ;;
+  esac
+}
+
 build_assist_policy() {
   if ! is_truthy "$ASSIST_ENABLED" || [ "${ASSIST_MAX_ROUNDS:-0}" -le 0 ] 2>/dev/null; then
     return 0
@@ -1315,7 +1342,7 @@ reviewer_conductor_exec() {
   fi
 
   # Effort applies whether manual-provider or auto-routed.
-  args+=(--effort "${CONDUCTOR_EFFORT:-max}")
+  args+=(--effort "${CONDUCTOR_EFFORT:-high}")
 
   # REVIEW_MODE → subcommand + tools. Conductor translates these portable tool
   # names into each provider's native permission/sandbox contract.
@@ -1345,7 +1372,9 @@ reviewer_conductor_exec() {
 
   if [ "$subcommand" = "exec" ]; then
     args+=(--tools "$tools")
-    args+=(--timeout "${CODEX_REVIEW_TIMEOUT:-300}")
+    if [ "${REVIEW_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
+      args+=(--timeout "$REVIEW_TIMEOUT")
+    fi
     if [ -n "${REVIEW_CONDUCTOR_LOG_FILE:-}" ]; then
       args+=(--log-file "$REVIEW_CONDUCTOR_LOG_FILE")
     fi
@@ -1353,9 +1382,8 @@ reviewer_conductor_exec() {
 
   # Pass the prompt via stdin. Avoids argv length limits on large diffs and
   # matches Conductor's established stdin-fallback path.
-  CODEX_REVIEW_IN_PROGRESS=1 \
-    printf '%s' "$prompt" \
-    | conductor "$subcommand" "${args[@]}"
+  printf '%s' "$prompt" \
+    | CODEX_REVIEW_IN_PROGRESS=1 conductor "$subcommand" "${args[@]}"
 }
 
 conductor_subcommand_for_mode() {
@@ -1520,7 +1548,20 @@ ASSIST_OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-assist-output.XX
 REVIEW_STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-stderr.XXXXXX")"
 REVIEW_CONDUCTOR_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-conductor.XXXXXX")"
 PEER_CONDUCTOR_LOG_FILE=""
-trap 'rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE" "$REVIEW_STDERR_FILE" "$REVIEW_CONDUCTOR_LOG_FILE"' EXIT
+REVIEW_LOCK_DIR=""
+REVIEW_LOCK_ACQUIRED=false
+REVIEW_LOCK_TOKEN=""
+
+cleanup_review_process() {
+  rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE" "$REVIEW_STDERR_FILE" "$REVIEW_CONDUCTOR_LOG_FILE"
+  if [ "$REVIEW_LOCK_ACQUIRED" = true ] && [ -n "$REVIEW_LOCK_DIR" ]; then
+    if [ "$(review_lock_metadata_value token 2>/dev/null || true)" = "$REVIEW_LOCK_TOKEN" ]; then
+      rm -rf "$REVIEW_LOCK_DIR" 2>/dev/null || true
+    fi
+  fi
+}
+
+trap cleanup_review_process EXIT
 
 kill_process_tree() {
   local pid="$1"
@@ -1629,6 +1670,100 @@ handle_error() {
   fi
 }
 
+review_lock_metadata_value() {
+  local key="$1"
+  local file="${2:-$REVIEW_LOCK_DIR/metadata}"
+
+  [ -f "$file" ] || return 0
+  awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' "$file" 2>/dev/null || true
+}
+
+review_lock_pid_is_alive() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  case "$pid" in
+    *[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+review_lock_branch_name() {
+  local branch="${CODEX_REVIEW_BRANCH_NAME:-}"
+  if [ -z "$branch" ]; then
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  fi
+  printf '%s' "$branch"
+}
+
+write_review_lock_metadata() {
+  local metadata_file="$REVIEW_LOCK_DIR/metadata"
+
+  {
+    printf 'token=%s\n' "$REVIEW_LOCK_TOKEN"
+    printf 'pid=%s\n' "$$"
+    printf 'started_at_epoch=%s\n' "$(date +%s)"
+    printf 'branch=%s\n' "$(review_lock_branch_name)"
+    printf 'base=%s\n' "$BASE"
+    printf 'merge_base=%s\n' "$MERGE_BASE"
+    printf 'head=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'cwd=%s\n' "$(pwd -P)"
+    printf 'command=%s\n' "$0"
+  } >"$metadata_file" 2>/dev/null || true
+}
+
+acquire_review_lock() {
+  local wait_seconds="${CODEX_REVIEW_LOCK_WAIT_SECONDS:-600}"
+  local stale_seconds="${CODEX_REVIEW_LOCK_STALE_SECONDS:-7200}"
+  local start_epoch now_epoch elapsed lock_pid lock_started lock_age announced=false
+
+  if is_truthy "${CODEX_REVIEW_DISABLE_LOCK:-false}"; then
+    return 0
+  fi
+
+  REVIEW_LOCK_DIR="$(git rev-parse --git-path touchstone/codex-review.lock)"
+  mkdir -p "$(dirname "$REVIEW_LOCK_DIR")" 2>/dev/null || true
+  start_epoch="$(date +%s)"
+  REVIEW_LOCK_TOKEN="$$:$start_epoch"
+
+  while ! mkdir "$REVIEW_LOCK_DIR" 2>/dev/null; do
+    now_epoch="$(date +%s)"
+    lock_pid="$(review_lock_metadata_value pid)"
+    lock_started="$(review_lock_metadata_value started_at_epoch)"
+
+    if ! review_lock_pid_is_alive "$lock_pid"; then
+      echo "==> Removing stale review lock at $REVIEW_LOCK_DIR (pid ${lock_pid:-unknown} is not running)."
+      rm -rf "$REVIEW_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+
+    if [ -n "$lock_started" ] && [ "$lock_started" -le "$now_epoch" ] 2>/dev/null; then
+      lock_age=$((now_epoch - lock_started))
+      if [ "$stale_seconds" -ge 0 ] 2>/dev/null && [ "$lock_age" -gt "$stale_seconds" ]; then
+        echo "==> Removing stale review lock at $REVIEW_LOCK_DIR (age ${lock_age}s > ${stale_seconds}s)."
+        rm -rf "$REVIEW_LOCK_DIR" 2>/dev/null || true
+        continue
+      fi
+    fi
+
+    if [ "$announced" = false ]; then
+      echo "==> Another Touchstone review gate is already running for this checkout; waiting for the lock."
+      echo "    lock: $REVIEW_LOCK_DIR"
+      echo "    pid:  ${lock_pid:-unknown}"
+      echo "    head: $(review_lock_metadata_value head)"
+      announced=true
+    fi
+
+    elapsed=$((now_epoch - start_epoch))
+    if [ "$wait_seconds" -ge 0 ] 2>/dev/null && [ "$elapsed" -ge "$wait_seconds" ]; then
+      handle_error "review lock busy"
+    fi
+    sleep 2
+  done
+
+  REVIEW_LOCK_ACQUIRED=true
+  write_review_lock_metadata
+}
+
 # --------------------------------------------------------------------------
 # Pre-flight checks
 # --------------------------------------------------------------------------
@@ -1658,7 +1793,7 @@ if is_pre_push_hook && ! is_truthy "${CODEX_REVIEW_FORCE:-false}"; then
   if [ "$_firstpush_remote_branch" = "$_firstpush_default_branch" ]; then
     if _firstpush_commit_count="$(git rev-list --count HEAD 2>/dev/null)" \
       && [ "$_firstpush_commit_count" = "1" ]; then
-      echo "==> Codex review skipped — first push on a fresh scaffold (HEAD is the initial commit)."
+      echo "==> Conductor review skipped — first push on a fresh scaffold (HEAD is the initial commit)."
       log_skip_event other fresh-scaffold-first-push
       exit 0
     fi
@@ -1698,26 +1833,35 @@ if git diff --quiet "$MERGE_BASE"..HEAD; then
   exit 0
 fi
 
+acquire_review_lock
+
+DETERMINISTIC_PREFLIGHT_RESULT="not-run"
+
 run_deterministic_preflight() {
   if ! is_truthy "$PREFLIGHT_REQUIRED"; then
     echo "==> Preflight disabled by [review].preflight_required=false."
+    DETERMINISTIC_PREFLIGHT_RESULT="skipped: disabled by config"
     return 0
   fi
   if is_truthy "${TOUCHSTONE_NO_PREFLIGHT:-false}"; then
     echo "==> Skipping preflight because TOUCHSTONE_NO_PREFLIGHT=1."
+    DETERMINISTIC_PREFLIGHT_RESULT="skipped: TOUCHSTONE_NO_PREFLIGHT=1"
     return 0
   fi
   if is_truthy "${TOUCHSTONE_PREFLIGHT_ALREADY_RAN:-false}"; then
     echo "==> Skipping preflight because this review was invoked after a clean preflight."
+    DETERMINISTIC_PREFLIGHT_RESULT="passed before this review"
     return 0
   fi
   if ! declare -F touchstone_preflight_main >/dev/null 2>&1; then
     echo "==> Preflight helper not found at $PREFLIGHT_SCRIPT — skipping preflight."
+    DETERMINISTIC_PREFLIGHT_RESULT="skipped: helper missing"
     return 0
   fi
 
   echo "==> Running deterministic preflight before AI review (diff vs $BASE) ..."
-  if touchstone_preflight_main --diff "$BASE" "$REPO_ROOT"; then
+  if touchstone_preflight_main_sanitized --diff "$BASE" "$REPO_ROOT"; then
+    DETERMINISTIC_PREFLIGHT_RESULT="passed before this review"
     return 0
   fi
 
@@ -1801,6 +1945,7 @@ fi)
 ## Auto-fix policy
 
 $AUTOFIX_POLICY
+$(build_preflight_review_policy)
 $(build_assist_policy)
 $(if [ -n "$REVIEW_CONTEXT_FILE" ]; then
   printf '\n## Project review context\n\n'
@@ -1897,7 +2042,7 @@ review_cache_key() {
     printf 'assist_helpers=%s\n' "${ASSIST_HELPERS[*]:-}"
     # Conductor knobs (CLI-effective values, post env+config resolution).
     # Without these, a review at prefer=cheapest/effort=minimal would
-    # silently satisfy a later push expecting prefer=best/effort=max
+    # silently satisfy a later push expecting prefer=best/effort=high
     # because the diff hash matches.
     printf 'conductor_with=%s\n' "${CONDUCTOR_WITH:-}"
     printf 'conductor_prefer=%s\n' "${CONDUCTOR_PREFER:-}"
@@ -2620,9 +2765,8 @@ run_peer_review() {
   # Peer is single-turn (no tools). `conductor call` sees the primary's
   # findings + a framing prompt; the router picks a non-primary provider.
   local peer_output peer_log_before peer_log_after
-  # ASSIST_TIMEOUT config applies via the outer run_reviewer_with_timeout
-  # wrapper when the primary timed out; peer call runs synchronously and
-  # relies on conductor's own per-provider timeout (currently 300s default).
+  # Peer call runs synchronously and relies on Conductor's own provider/stall
+  # handling; ASSIST_TIMEOUT still applies to explicit assistant loops.
   PEER_CONDUCTOR_LOG_FILE=""
   peer_log_before="$(latest_conductor_session_log)"
   peer_output="$(printf '%s' "$peer_prompt" \

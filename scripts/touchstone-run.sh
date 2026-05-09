@@ -13,6 +13,8 @@
 set -euo pipefail
 
 ACTION="${1:-validate}"
+HOOK_PRE_COMMIT_REMOTE_BRANCH="${PRE_COMMIT_REMOTE_BRANCH:-}"
+HOOK_PRE_COMMIT_REMOTE_NAME="${PRE_COMMIT_REMOTE_NAME:-origin}"
 
 clear_git_hook_env() {
   unset GIT_DIR
@@ -23,6 +25,53 @@ clear_git_hook_env() {
   unset GIT_NAMESPACE
   unset GIT_PREFIX
   unset GIT_INTERNAL_GETTEXT_SH_SCHEME
+  unset PRE_COMMIT
+  unset PRE_COMMIT_FROM_REF
+  unset PRE_COMMIT_TO_REF
+  unset PRE_COMMIT_LOCAL_BRANCH
+  unset PRE_COMMIT_REMOTE_BRANCH
+  unset PRE_COMMIT_REMOTE_NAME
+  unset PRE_COMMIT_REMOTE_URL
+}
+
+clear_review_env() {
+  unset TOUCHSTONE_REVIEWER
+  unset TOUCHSTONE_LOCAL_REVIEWER_COMMAND
+  unset TOUCHSTONE_PREFLIGHT_ALREADY_RAN
+  unset TOUCHSTONE_CONDUCTOR_WITH
+  unset TOUCHSTONE_CONDUCTOR_PREFER
+  unset TOUCHSTONE_CONDUCTOR_EFFORT
+  unset TOUCHSTONE_CONDUCTOR_TAGS
+  unset TOUCHSTONE_CONDUCTOR_EXCLUDE
+  unset CODEX_REVIEW_ENABLED
+  unset CODEX_REVIEW_MODE
+  unset CODEX_REVIEW_BASE
+  unset CODEX_REVIEW_BRANCH_NAME
+  unset CODEX_REVIEW_FORCE
+  unset CODEX_REVIEW_NO_AUTOFIX
+  unset CODEX_REVIEW_MAX_ITERATIONS
+  unset CODEX_REVIEW_MAX_DIFF_LINES
+  unset CODEX_REVIEW_CACHE_CLEAN
+  unset CODEX_REVIEW_DISABLE_CACHE
+  unset CODEX_REVIEW_TIMEOUT
+  unset CODEX_REVIEW_ON_ERROR
+  unset CODEX_REVIEW_CONTEXT_MODE
+  unset CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES
+  unset CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES
+  unset CODEX_REVIEW_LOCK_WAIT_SECONDS
+  unset CODEX_REVIEW_LOCK_STALE_SECONDS
+  unset CODEX_REVIEW_DISABLE_LOCK
+  unset CODEX_REVIEW_IN_PROGRESS
+  unset CODEX_REVIEW_ASSIST
+  unset CODEX_REVIEW_ASSIST_TIMEOUT
+  unset CODEX_REVIEW_ASSIST_MAX_ROUNDS
+  unset CODEX_REVIEW_ASSIST_WITH
+  unset CODEX_REVIEW_ASSIST_PREFER
+  unset CODEX_REVIEW_ASSIST_EFFORT
+  unset CODEX_REVIEW_ASSIST_TAGS
+  unset CODEX_REVIEW_SUMMARY_FILE
+  unset CODEX_REVIEW_FINDINGS_HISTORY_FILE
+  unset CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS
 }
 
 # tests/test-find-python-bin.sh sources this script with
@@ -34,6 +83,7 @@ if [ "${TOUCHSTONE_RUN_SOURCE_ONLY:-0}" = "1" ]; then
   REPO_ROOT="${TOUCHSTONE_RUN_TEST_REPO_ROOT:-$(pwd)}"
 else
   clear_git_hook_env
+  clear_review_env
   REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   cd "$REPO_ROOT"
 fi
@@ -63,6 +113,55 @@ trim() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+truthy() {
+  case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true | 1 | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+short_ref_name() {
+  local ref="$1"
+  local remote="${2:-origin}"
+
+  case "$ref" in
+    refs/heads/*) ref="${ref#refs/heads/}" ;;
+    refs/remotes/"$remote"/*) ref="${ref#refs/remotes/$remote/}" ;;
+    "$remote"/*) ref="${ref#"$remote/"}" ;;
+  esac
+  printf '%s' "$ref"
+}
+
+default_branch_for_remote() {
+  local remote="${1:-origin}"
+  local ref
+
+  ref="$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)"
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#"$remote/"}"
+    return 0
+  fi
+
+  return 1
+}
+
+should_skip_feature_push_validate() {
+  local remote_branch default_branch
+
+  truthy "${TOUCHSTONE_VALIDATE_SKIP_FEATURE_PUSH:-false}" || return 1
+  [ "$ACTION" = "validate" ] || return 1
+  [ -n "$HOOK_PRE_COMMIT_REMOTE_BRANCH" ] || return 1
+
+  remote_branch="$(short_ref_name "$HOOK_PRE_COMMIT_REMOTE_BRANCH" "$HOOK_PRE_COMMIT_REMOTE_NAME")"
+  [ -n "$remote_branch" ] || return 1
+  default_branch="$(default_branch_for_remote "$HOOK_PRE_COMMIT_REMOTE_NAME" || true)"
+  [ -n "$default_branch" ] || return 1
+
+  [ "$remote_branch" != "$default_branch" ] \
+    && [ "$remote_branch" != "main" ] \
+    && [ "$remote_branch" != "master" ]
 }
 
 load_config() {
@@ -187,6 +286,27 @@ run_shell_command() {
     -u PRE_COMMIT -u PRE_COMMIT_FROM_REF -u PRE_COMMIT_TO_REF \
     -u PRE_COMMIT_LOCAL_BRANCH -u PRE_COMMIT_REMOTE_BRANCH \
     -u PRE_COMMIT_REMOTE_NAME -u PRE_COMMIT_REMOTE_URL \
+    -u TOUCHSTONE_REVIEWER -u TOUCHSTONE_LOCAL_REVIEWER_COMMAND \
+    -u TOUCHSTONE_PREFLIGHT_ALREADY_RAN \
+    -u TOUCHSTONE_CONDUCTOR_WITH -u TOUCHSTONE_CONDUCTOR_PREFER \
+    -u TOUCHSTONE_CONDUCTOR_EFFORT -u TOUCHSTONE_CONDUCTOR_TAGS \
+    -u TOUCHSTONE_CONDUCTOR_EXCLUDE \
+    -u CODEX_REVIEW_ENABLED -u CODEX_REVIEW_MODE -u CODEX_REVIEW_BASE \
+    -u CODEX_REVIEW_BRANCH_NAME -u CODEX_REVIEW_FORCE \
+    -u CODEX_REVIEW_NO_AUTOFIX -u CODEX_REVIEW_MAX_ITERATIONS \
+    -u CODEX_REVIEW_MAX_DIFF_LINES -u CODEX_REVIEW_CACHE_CLEAN \
+    -u CODEX_REVIEW_DISABLE_CACHE -u CODEX_REVIEW_TIMEOUT \
+    -u CODEX_REVIEW_ON_ERROR -u CODEX_REVIEW_CONTEXT_MODE \
+    -u CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES \
+    -u CODEX_REVIEW_CONTEXT_SMALL_MAX_FILES \
+    -u CODEX_REVIEW_LOCK_WAIT_SECONDS -u CODEX_REVIEW_LOCK_STALE_SECONDS \
+    -u CODEX_REVIEW_DISABLE_LOCK -u CODEX_REVIEW_IN_PROGRESS \
+    -u CODEX_REVIEW_ASSIST -u CODEX_REVIEW_ASSIST_TIMEOUT \
+    -u CODEX_REVIEW_ASSIST_MAX_ROUNDS -u CODEX_REVIEW_ASSIST_WITH \
+    -u CODEX_REVIEW_ASSIST_PREFER -u CODEX_REVIEW_ASSIST_EFFORT \
+    -u CODEX_REVIEW_ASSIST_TAGS -u CODEX_REVIEW_SUMMARY_FILE \
+    -u CODEX_REVIEW_FINDINGS_HISTORY_FILE \
+    -u CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS \
     bash -c "$command"
 }
 
@@ -377,8 +497,7 @@ run_python_action() {
     test)
       if python_bin="$(find_python_bin)"; then
         local pytest_rc=0
-        info "$python_bin -m pytest"
-        bash -c "$python_bin -m pytest" || pytest_rc=$?
+        run_shell_command "$python_bin -m pytest" || pytest_rc=$?
         # pytest exit 5 = no tests collected. Treat like absent linters — skip, don't fail.
         if [ "$pytest_rc" -eq 5 ]; then
           ok "pytest found no tests; skipped"
@@ -565,6 +684,11 @@ run_action() {
 
 run_validate() {
   local configured
+
+  if should_skip_feature_push_validate; then
+    ok "feature-branch pre-push validate skipped; merge gate runs full validation"
+    return 0
+  fi
 
   configured="$(configured_command_for_action validate)"
   if [ -n "$configured" ]; then

@@ -511,6 +511,39 @@ post_findings_history_comment() {
   return 0
 }
 
+failed_checks() {
+  gh pr checks "$PR_NUMBER" \
+    --json name,bucket,state,link \
+    --template '{{range .}}{{if eq .bucket "fail"}}{{.name}}{{"\t"}}{{.state}}{{"\t"}}{{.link}}{{"\n"}}{{end}}{{end}}' \
+    2>/dev/null || true
+}
+
+print_failed_checks_and_exit() {
+  local failed_checks="$1"
+  local name state link
+
+  [ -n "$failed_checks" ] || return 1
+
+  echo "ERROR: PR #$PR_NUMBER has failed check(s); stopping automerge." >&2
+  while IFS="$(printf '\t')" read -r name state link || [ -n "$name" ]; do
+    [ -n "$name" ] || continue
+    if [ -n "$link" ]; then
+      echo "       - $name (${state:-failed}): $link" >&2
+    else
+      echo "       - $name (${state:-failed})" >&2
+    fi
+  done <<<"$failed_checks"
+  TOUCHSTONE_MERGE_FAILURE_REASON="check-failed"
+  exit 1
+}
+
+review_output_has_concrete_findings() {
+  local output_file="$1"
+
+  [ -f "$output_file" ] || return 1
+  grep -Eq 'CODEX_REVIEW_BLOCKED|Conductor review found|blocking advisory finding|blocking finding|findings[" ]*[:=][" ]*[1-9]' "$output_file"
+}
+
 run_preflight_gate() {
   local base_ref="$1"
 
@@ -529,7 +562,7 @@ run_preflight_gate() {
 
   echo "==> Running deterministic preflight before merge review (diff vs $base_ref) ..."
   touchstone_emit_event preflight_started pr_number="$PR_NUMBER" mode=merge
-  if touchstone_preflight_main --diff "$base_ref" "$(git rev-parse --show-toplevel)"; then
+  if touchstone_preflight_main_sanitized --diff "$base_ref" "$(git rev-parse --show-toplevel)"; then
     touchstone_emit_event preflight_clean pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
     return 0
   fi
@@ -676,21 +709,27 @@ run_merge_review() {
 
   echo "==> Running merge review ..."
   local review_rc=0
+  local review_output_file
+  review_output_file="$(mktemp -t touchstone-merge-review.XXXXXX.txt)"
   REVIEW_SUMMARY_FILE="$(git rev-parse --git-path "touchstone/review-summary-pr-${PR_NUMBER}.json" 2>/dev/null || echo "")"
   if [ -n "$REVIEW_SUMMARY_FILE" ]; then
     mkdir -p "$(dirname "$REVIEW_SUMMARY_FILE")" 2>/dev/null || true
     rm -f "$REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
   touchstone_emit_event review_started pr_number="$PR_NUMBER" mode=review-only
+  set +e
   CODEX_REVIEW_BASE="$default_base_ref" \
     CODEX_REVIEW_BRANCH_NAME="$pr_head_branch" \
     CODEX_REVIEW_FORCE=1 \
     CODEX_REVIEW_MODE=review-only \
     TOUCHSTONE_PREFLIGHT_ALREADY_RAN=1 \
     CODEX_REVIEW_SUMMARY_FILE="$REVIEW_SUMMARY_FILE" \
-    bash "$REVIEW_SCRIPT" || review_rc=$?
+    bash "$REVIEW_SCRIPT" 2>&1 | tee "$review_output_file"
+  review_rc="${PIPESTATUS[0]}"
+  set -e
 
   if [ "$review_rc" -eq 0 ]; then
+    rm -f "$review_output_file"
     touchstone_emit_event review_clean pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
     return 0
   fi
@@ -707,6 +746,15 @@ run_merge_review() {
   local current_merge_base
   if current_merge_base="$(git merge-base "$default_base_ref" "$pr_head_oid" 2>/dev/null)" \
     && branch_has_clean_review_marker "$pr_head_branch" "$pr_head_oid" "$current_merge_base"; then
+    if review_output_has_concrete_findings "$review_output_file"; then
+      echo "" >&2
+      echo "ERROR: Merge review returned concrete findings; refusing to auto-bypass with a prior clean marker." >&2
+      echo "       Fix the findings or use an explicit manual bypass with disclosure." >&2
+      rm -f "$review_output_file"
+      touchstone_emit_event review_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
+      TOUCHSTONE_MERGE_FAILURE_REASON="review-blocked"
+      return "$review_rc"
+    fi
     echo "" >&2
     echo "==> Merge review exited $review_rc, but a prior clean review marker is recorded for HEAD $pr_head_oid." >&2
     echo "==> Auto-promoting to reviewer bypass with disclosure." >&2
@@ -715,9 +763,11 @@ run_merge_review() {
     touchstone_emit_event review_bypass pr_number="$PR_NUMBER" head_sha="$pr_head_oid" reason="$BYPASS_REASON"
     print_bypass_banner
     record_bypass_comment
+    rm -f "$review_output_file"
     return 0
   fi
 
+  rm -f "$review_output_file"
   touchstone_emit_event review_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
   TOUCHSTONE_MERGE_FAILURE_REASON="review-blocked"
   return "$review_rc"
@@ -751,6 +801,10 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   echo "    attempt $attempt: mergeStateStatus=$STATE mergeable=$MERGEABLE"
   if [ "$STATE" = "CLEAN" ] && [ "$MERGEABLE" = "MERGEABLE" ]; then
     break
+  fi
+  FAILED_CHECKS="$(failed_checks)"
+  if [ -n "$FAILED_CHECKS" ]; then
+    print_failed_checks_and_exit "$FAILED_CHECKS"
   fi
   if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$STATE" = "DIRTY" ] || [ "$STATE" = "BEHIND" ] || [ "$STATE" = "CONFLICTING" ]; then
     echo "ERROR: PR #$PR_NUMBER is $STATE — has conflicts or is out of date with base." >&2
@@ -833,10 +887,10 @@ sync_default_branch_after_merge
 # 6. Cortex post-merge hook (T1.9). Fires only when the project meets the
 # activation criteria documented in scripts/cortex-pr-merged-hook.sh.
 # Activation is the hook's job — we always invoke and let it self-gate.
-# The hook may produce a follow-up commit on the default branch; that
-# commit is created with --no-verify so it doesn't recurse through this
-# script's review gates. Failures inside the hook surface as visible
-# stderr; we don't fail the overall merge over a journal-write hiccup.
+# The hook may produce a follow-up journal branch/PR; the journal commit
+# is created with --no-verify so it doesn't recurse through this script's
+# review gates. Failures inside the hook surface as visible stderr; we
+# don't fail the overall merge over a journal-write hiccup.
 CORTEX_HOOK_SCRIPT=""
 for candidate_hook in \
   "$SCRIPT_DIR/cortex-pr-merged-hook.sh" \
