@@ -399,8 +399,12 @@ ROUTING_SMALL_EFFORT="minimal"
 ROUTING_SMALL_TAGS=""
 ROUTING_LARGE_WITH=""
 ROUTING_LARGE_PREFER="best"
-ROUTING_LARGE_EFFORT="high"
+ROUTING_LARGE_EFFORT="medium"
 ROUTING_LARGE_TAGS=""
+ROUTING_HIGH_RISK_WITH=""
+ROUTING_HIGH_RISK_PREFER="best"
+ROUTING_HIGH_RISK_EFFORT="high"
+ROUTING_HIGH_RISK_TAGS=""
 ROUTING_DECISION="default"
 PROMPT_CONTEXT_MODE="${CODEX_REVIEW_CONTEXT_MODE:-auto}"
 PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES="${CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES:-400}"
@@ -413,6 +417,7 @@ GEMINI.md
 .codex-review-context.md
 .github/codex-review-context.md
 .github/workflows/
+bootstrap/
 hooks/codex-review.sh
 hooks/codex-review.config.example.toml
 scripts/codex-review.sh
@@ -771,6 +776,10 @@ if [ -f "$CONFIG_FILE" ]; then
           large_prefer) ROUTING_LARGE_PREFER="$(toml_unquote "$value")" ;;
           large_effort) ROUTING_LARGE_EFFORT="$(toml_unquote "$value")" ;;
           large_tags) ROUTING_LARGE_TAGS="$(toml_unquote "$value")" ;;
+          high_risk_with) ROUTING_HIGH_RISK_WITH="$(toml_unquote "$value")" ;;
+          high_risk_prefer) ROUTING_HIGH_RISK_PREFER="$(toml_unquote "$value")" ;;
+          high_risk_effort) ROUTING_HIGH_RISK_EFFORT="$(toml_unquote "$value")" ;;
+          high_risk_tags) ROUTING_HIGH_RISK_TAGS="$(toml_unquote "$value")" ;;
           small_reviewers)
             if [[ "$value" == "["* ]]; then
               append_routing_small_reviewers_csv "$(toml_normalize_array "$value")"
@@ -1089,10 +1098,35 @@ find_path_matching_context_patterns() {
   return 1
 }
 
+find_full_context_reason() {
+  local changed_paths="$1"
+  local match
+
+  match="$(find_path_matching_context_patterns "$changed_paths" "$UNSAFE_PATHS" || true)"
+  if [ -n "$match" ]; then
+    printf 'high-risk path %s' "$match"
+    return 0
+  fi
+
+  match="$(find_path_matching_context_patterns "$changed_paths" "$PROMPT_CONTEXT_ARCHITECTURAL_PATHS" || true)"
+  if [ -n "$match" ]; then
+    printf 'architectural path %s' "$match"
+    return 0
+  fi
+
+  match="$(find_path_matching_context_patterns "$changed_paths" "$PROMPT_CONTEXT_FULL_PATHS" || true)"
+  if [ -n "$match" ]; then
+    printf 'configured full-context path %s' "$match"
+    return 0
+  fi
+
+  return 1
+}
+
 select_prompt_context_mode() {
   local diff_lines="$1"
   local changed_paths="$2"
-  local requested match
+  local requested full_reason size_reason
 
   PROMPT_CONTEXT_CHANGED_FILES="$(printf '%s\n' "$changed_paths" | sed '/^$/d' | wc -l | tr -d ' ')"
   requested="$(printf '%s' "${PROMPT_CONTEXT_MODE:-auto}" | tr '[:upper:]' '[:lower:]')"
@@ -1127,41 +1161,26 @@ select_prompt_context_mode() {
       ;;
   esac
 
-  match="$(find_path_matching_context_patterns "$changed_paths" "$UNSAFE_PATHS" || true)"
-  if [ -n "$match" ]; then
+  full_reason="$(find_full_context_reason "$changed_paths" || true)"
+  if [ -n "$full_reason" ]; then
     PROMPT_CONTEXT_DECISION="full"
-    PROMPT_CONTEXT_REASON="high-risk path $match"
+    PROMPT_CONTEXT_REASON="$full_reason"
     return 0
   fi
 
-  match="$(find_path_matching_context_patterns "$changed_paths" "$PROMPT_CONTEXT_ARCHITECTURAL_PATHS" || true)"
-  if [ -n "$match" ]; then
-    PROMPT_CONTEXT_DECISION="full"
-    PROMPT_CONTEXT_REASON="architectural path $match"
-    return 0
-  fi
-
-  match="$(find_path_matching_context_patterns "$changed_paths" "$PROMPT_CONTEXT_FULL_PATHS" || true)"
-  if [ -n "$match" ]; then
-    PROMPT_CONTEXT_DECISION="full"
-    PROMPT_CONTEXT_REASON="configured full-context path $match"
-    return 0
-  fi
-
-  if [ "$diff_lines" -gt "$PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES" ] 2>/dev/null; then
-    PROMPT_CONTEXT_DECISION="full"
-    PROMPT_CONTEXT_REASON="large diff ($diff_lines > $PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES lines)"
-    return 0
-  fi
-
-  if [ "$PROMPT_CONTEXT_CHANGED_FILES" -gt "$PROMPT_CONTEXT_SMALL_MAX_FILES" ] 2>/dev/null; then
-    PROMPT_CONTEXT_DECISION="full"
-    PROMPT_CONTEXT_REASON="broad diff ($PROMPT_CONTEXT_CHANGED_FILES > $PROMPT_CONTEXT_SMALL_MAX_FILES files)"
-    return 0
+  if [ "$diff_lines" -gt "$PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES" ] 2>/dev/null \
+    && [ "$PROMPT_CONTEXT_CHANGED_FILES" -gt "$PROMPT_CONTEXT_SMALL_MAX_FILES" ] 2>/dev/null; then
+    size_reason="low-risk large/broad diff ($diff_lines > $PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES lines, $PROMPT_CONTEXT_CHANGED_FILES > $PROMPT_CONTEXT_SMALL_MAX_FILES files)"
+  elif [ "$diff_lines" -gt "$PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES" ] 2>/dev/null; then
+    size_reason="low-risk large diff ($diff_lines > $PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES lines)"
+  elif [ "$PROMPT_CONTEXT_CHANGED_FILES" -gt "$PROMPT_CONTEXT_SMALL_MAX_FILES" ] 2>/dev/null; then
+    size_reason="low-risk broad diff ($PROMPT_CONTEXT_CHANGED_FILES > $PROMPT_CONTEXT_SMALL_MAX_FILES files)"
+  else
+    size_reason="small/simple diff ($diff_lines <= $PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES lines, $PROMPT_CONTEXT_CHANGED_FILES <= $PROMPT_CONTEXT_SMALL_MAX_FILES files)"
   fi
 
   PROMPT_CONTEXT_DECISION="bounded"
-  PROMPT_CONTEXT_REASON="small/simple diff ($diff_lines <= $PROMPT_CONTEXT_SMALL_MAX_DIFF_LINES lines, $PROMPT_CONTEXT_CHANGED_FILES <= $PROMPT_CONTEXT_SMALL_MAX_FILES files) with no high-risk, architectural, or configured full-context path matches"
+  PROMPT_CONTEXT_REASON="$size_reason with no high-risk, architectural, or configured full-context path matches"
 }
 
 build_prompt_context_instructions() {
@@ -1170,7 +1189,7 @@ build_prompt_context_instructions() {
 ## Project context mode
 
 Full AGENTS.md and CLAUDE.md context was intentionally omitted because this is a $PROMPT_CONTEXT_REASON.
-Use the bounded project review context below. Do not spend context loading AGENTS.md or CLAUDE.md for this small/simple review.
+Use the bounded project review context below. Do not spend context loading AGENTS.md or CLAUDE.md unless the diff itself makes that necessary.
 
 Bounded project review context:
 - Review only concrete correctness, safety, compatibility, and test-coverage risks in this diff.
@@ -1480,6 +1499,8 @@ resolve_assist_reviewer() {
 
 apply_review_routing() {
   local diff_lines="$1"
+  local changed_paths="${2:-}"
+  local risk_reason
 
   is_truthy "$ROUTING_ENABLED" || return 0
   [ -z "${TOUCHSTONE_REVIEWER:-}" ] || return 0
@@ -1502,7 +1523,17 @@ apply_review_routing() {
     ROUTING_LARGE_REVIEWERS=("${REVIEWER_CASCADE[@]}")
   fi
 
-  if [ "$diff_lines" -le "$ROUTING_SMALL_MAX_DIFF_LINES" ] 2>/dev/null; then
+  risk_reason="$(find_full_context_reason "$changed_paths" || true)"
+
+  if [ -n "$risk_reason" ]; then
+    REVIEWER_CASCADE=("${ROUTING_LARGE_REVIEWERS[@]}")
+    ROUTING_DECISION="high-risk"
+    [ -n "$ROUTING_HIGH_RISK_WITH" ] && CONDUCTOR_WITH="${TOUCHSTONE_CONDUCTOR_WITH:-$ROUTING_HIGH_RISK_WITH}"
+    [ -n "$ROUTING_HIGH_RISK_PREFER" ] && CONDUCTOR_PREFER="${TOUCHSTONE_CONDUCTOR_PREFER:-$ROUTING_HIGH_RISK_PREFER}"
+    [ -n "$ROUTING_HIGH_RISK_EFFORT" ] && CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-$ROUTING_HIGH_RISK_EFFORT}"
+    [ -n "$ROUTING_HIGH_RISK_TAGS" ] && CONDUCTOR_TAGS="${TOUCHSTONE_CONDUCTOR_TAGS:-$ROUTING_HIGH_RISK_TAGS}"
+    echo "==> Review routing: high-risk diff ($risk_reason; $diff_lines lines) — with=${CONDUCTOR_WITH:-auto} prefer=$CONDUCTOR_PREFER effort=$CONDUCTOR_EFFORT"
+  elif [ "$diff_lines" -le "$ROUTING_SMALL_MAX_DIFF_LINES" ] 2>/dev/null; then
     REVIEWER_CASCADE=("${ROUTING_SMALL_REVIEWERS[@]}")
     ROUTING_DECISION="small"
     # Apply 2.0 small-bucket overrides. Non-empty fields win; env still
@@ -1515,12 +1546,12 @@ apply_review_routing() {
     echo "==> Review routing: small diff ($diff_lines <= $ROUTING_SMALL_MAX_DIFF_LINES) — with=${CONDUCTOR_WITH:-auto} prefer=$CONDUCTOR_PREFER effort=$CONDUCTOR_EFFORT"
   else
     REVIEWER_CASCADE=("${ROUTING_LARGE_REVIEWERS[@]}")
-    ROUTING_DECISION="large"
+    ROUTING_DECISION="large-low-risk"
     [ -n "$ROUTING_LARGE_WITH" ] && CONDUCTOR_WITH="${TOUCHSTONE_CONDUCTOR_WITH:-$ROUTING_LARGE_WITH}"
     [ -n "$ROUTING_LARGE_PREFER" ] && CONDUCTOR_PREFER="${TOUCHSTONE_CONDUCTOR_PREFER:-$ROUTING_LARGE_PREFER}"
     [ -n "$ROUTING_LARGE_EFFORT" ] && CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-$ROUTING_LARGE_EFFORT}"
     [ -n "$ROUTING_LARGE_TAGS" ] && CONDUCTOR_TAGS="${TOUCHSTONE_CONDUCTOR_TAGS:-$ROUTING_LARGE_TAGS}"
-    echo "==> Review routing: larger diff ($diff_lines > $ROUTING_SMALL_MAX_DIFF_LINES) — with=${CONDUCTOR_WITH:-auto} prefer=$CONDUCTOR_PREFER effort=$CONDUCTOR_EFFORT"
+    echo "==> Review routing: larger low-risk diff ($diff_lines > $ROUTING_SMALL_MAX_DIFF_LINES) — with=${CONDUCTOR_WITH:-auto} prefer=$CONDUCTOR_PREFER effort=$CONDUCTOR_EFFORT"
   fi
 }
 
@@ -1878,7 +1909,8 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 ROUTING_DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
-apply_review_routing "$ROUTING_DIFF_LINE_COUNT"
+PROMPT_CONTEXT_CHANGED_PATHS="$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || true)"
+apply_review_routing "$ROUTING_DIFF_LINE_COUNT" "$PROMPT_CONTEXT_CHANGED_PATHS"
 
 # Resolve which reviewer to use from the cascade.
 if ! resolve_reviewer; then
@@ -1906,7 +1938,6 @@ if ! resolve_reviewer; then
   exit 0
 fi
 REVIEWER_LABEL="$(reviewer_label)"
-PROMPT_CONTEXT_CHANGED_PATHS="$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || true)"
 select_prompt_context_mode "$ROUTING_DIFF_LINE_COUNT" "$PROMPT_CONTEXT_CHANGED_PATHS"
 echo "==> Using reviewer: $REVIEWER_LABEL"
 echo "==> Prompt context: $PROMPT_CONTEXT_DECISION ($PROMPT_CONTEXT_REASON)"
@@ -2868,6 +2899,7 @@ print_summary() {
   fi
   printf "  ${C_DIM}mode:           %s${C_RESET}\n" "$REVIEW_MODE"
   printf "  ${C_DIM}context:        %s${C_RESET}\n" "$PROMPT_CONTEXT_DECISION"
+  printf "  ${C_DIM}budget:         prefer=%s effort=%s${C_RESET}\n" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}"
   printf "  ${C_DIM}files:          %s${C_RESET}\n" "$REVIEW_FILES_INSPECTED"
   printf "  ${C_DIM}diff lines:     %s${C_RESET}\n" "$DIFF_LINE_COUNT"
   printf "  ${C_DIM}iterations:     %s/%s${C_RESET}\n" "${iter:-0}" "$MAX_ITERATIONS"
@@ -2879,8 +2911,8 @@ print_summary() {
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
-      "$REVIEWER_LABEL" "$provider" "$model" "$peer_provider" "$ROUTING_DECISION" "$REVIEW_MODE" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
+    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
+      "$REVIEWER_LABEL" "$provider" "$model" "$peer_provider" "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
       "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "$findings" "$REVIEW_EXIT_REASON" "$elapsed" \
       >"$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
