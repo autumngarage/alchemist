@@ -8,7 +8,7 @@
 #
 # Usage:
 #   bash scripts/open-pr.sh                          # title from last commit; base = default branch
-#   bash scripts/open-pr.sh --auto-merge             # open + Codex review + squash-merge
+#   bash scripts/open-pr.sh --auto-merge             # open + merge-gate review + squash-merge
 #   bash scripts/open-pr.sh --auto-merge \
 #                            --cleanup-worktree       # auto-merge, then remove this feature worktree
 #   bash scripts/open-pr.sh --draft                  # same, opened as draft
@@ -65,7 +65,7 @@ fi
 ORPHAN_PR_URL=""
 ORPHAN_PR_NUMBER=""
 BODY_FILE=""
-ADVISORY_AT_PR_OPEN=true
+ADVISORY_AT_PR_OPEN=false
 PREFLIGHT_REQUIRED=true
 
 on_exit() {
@@ -164,9 +164,10 @@ run_advisory_review_at_pr_open() {
   local pr_number="$1"
   local base_branch="$2"
   local review_script summary_file output_file review_rc summary_json comment
+  local advisory_preflight_passed=false
 
   if ! truthy "$ADVISORY_AT_PR_OPEN"; then
-    echo "==> Advisory review at PR open disabled by [review].advisory_at_pr_open=false."
+    echo "==> Advisory review at PR open disabled; merge-gate review still runs during auto-merge."
     return 0
   fi
 
@@ -180,10 +181,11 @@ run_advisory_review_at_pr_open() {
   if truthy "$PREFLIGHT_REQUIRED" && ! truthy "${TOUCHSTONE_NO_PREFLIGHT:-false}"; then
     if declare -F touchstone_preflight_main >/dev/null 2>&1; then
       echo "==> Running deterministic preflight before advisory review ..."
-      if ! TOUCHSTONE_PREFLIGHT_BASE="origin/$base_branch" touchstone_preflight_main "$(git rev-parse --show-toplevel)"; then
+      if ! touchstone_preflight_main_sanitized --diff "origin/$base_branch" "$(git rev-parse --show-toplevel)"; then
         echo "WARNING: preflight failed; skipping non-blocking advisory review to avoid spending provider tokens." >&2
         return 0
       fi
+      advisory_preflight_passed=true
     else
       echo "==> Preflight helper not found at $PREFLIGHT_SCRIPT — skipping preflight."
     fi
@@ -210,6 +212,7 @@ run_advisory_review_at_pr_open() {
     CODEX_REVIEW_BRANCH_NAME="$CURRENT_BRANCH" \
     CODEX_REVIEW_FORCE=1 \
     CODEX_REVIEW_MODE=review-only \
+    TOUCHSTONE_PREFLIGHT_ALREADY_RAN="$advisory_preflight_passed" \
     CODEX_REVIEW_SUMMARY_FILE="$summary_file" \
     bash "$review_script" >"$output_file" 2>&1 || review_rc=$?
 

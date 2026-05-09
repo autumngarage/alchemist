@@ -1,15 +1,20 @@
 # Managed by touchstone. These paths may be updated by `touchstone update`.
 .touchstone-manifest
 .touchstone-version
+TOUCHSTONE.md
+principles/README.md
 principles/agent-swarms.md
+principles/ai-delivery-architecture.md
 principles/audit-weak-points.md
 principles/documentation-ownership.md
 principles/engineering-principles.md
 principles/file-upstream-bugs.md
 principles/git-workflow.md
 principles/pre-implementation-checklist.md
-principles/README.md
 scripts/codex-review.sh
+scripts/branch-guard.sh
+scripts/emergency-disclosure.sh
+scripts/cortex-pr-merged-hook.sh
 scripts/touchstone-run.sh
 scripts/open-pr.sh
 scripts/merge-pr.sh
@@ -24,3 +29,5 @@ lib/preflight.sh
 lib/preflight-scope.sh
 lib/review-comment.sh
 scripts/run-pytest-in-venv.sh
+.claude/settings.json
+.claude/skills/touchstone-audit/SKILL.md
