@@ -69,6 +69,7 @@ def _stub_all_external(
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
     git_auth_failure: bool = False,
+    label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "missing" |
     # "timeout-but-actually-merged" | "timeout-and-not-merged"
     merge_outcome: str = "merged",
@@ -80,6 +81,9 @@ def _stub_all_external(
     """
     if issues is None:
         issues = [_issue()]
+    label_state: dict[str, set[str]] = {
+        str(issue.number): set(issue.labels) for issue in issues
+    }
 
     captured: dict[str, list[Any]] = {
         "subprocess_run_args": [],
@@ -112,7 +116,31 @@ def _stub_all_external(
             captured["assignee_changes"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
+        if "issue" in cmd and "view" in cmd and "--json" in cmd and "labels" in cmd:
+            issue_number = str(cmd[cmd.index("view") + 1])
+            stdout = "\n".join(sorted(label_state.get(issue_number, set())))
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=stdout, stderr="")
+
         if "issue" in cmd and "edit" in cmd:
+            if (
+                label_transition_fail_on
+                and "--add-label" in cmd
+                and cmd[cmd.index("--add-label") + 1] == label_transition_fail_on
+            ):
+                captured["label_transitions"].append(cmd)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=1, stdout="", stderr="label update failed"
+                )
+            issue_number = str(cmd[cmd.index("edit") + 1])
+            labels = label_state.setdefault(issue_number, set())
+            if "--remove-label" in cmd:
+                raw = cmd[cmd.index("--remove-label") + 1]
+                for label in str(raw).split(","):
+                    labels.discard(label)
+            if "--add-label" in cmd:
+                raw = cmd[cmd.index("--add-label") + 1]
+                for label in str(raw).split(","):
+                    labels.add(label)
             captured["label_transitions"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -311,6 +339,60 @@ def test_no_diff_produced_results_in_decline(monkeypatch: pytest.MonkeyPatch, tm
     assert any("declined" in b for b in bodies), f"expected 'declined' comment; got {bodies}"
 
 
+def test_shipped_label_failure_is_visible_in_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(
+        monkeypatch,
+        label_transition_fail_on="alchemist-test-shipped",
+    )
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].merged is True
+    assert results[0].error is not None
+    assert results[0].error.startswith("label-transition:")
+    assert len(captured["pr_creates"]) == 1
+
+
+def test_declined_label_failure_is_visible_as_fatal_label_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _stub_all_external(
+        monkeypatch,
+        conductor_outcome="no-diff",
+        label_transition_fail_on="alchemist-test-declined",
+    )
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("label-transition:")
+    assert "decline: conductor produced no diff" in results[0].error
+
+
+def test_error_label_failure_is_visible_in_bail_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _stub_all_external(
+        monkeypatch,
+        conductor_outcome="timeout",
+        label_transition_fail_on="alchemist-test-error",
+    )
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert "conductor: timeout" in results[0].error
+    assert "label-transition: label update failed" in results[0].error
+
+
 def test_ensure_labels_creates_declined_label(monkeypatch: pytest.MonkeyPatch):
     from alchemist.runner import _ensure_labels
 
@@ -349,6 +431,32 @@ def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_
     repos_processed = sorted({r.repo for r in results})
     assert "autumngarage/vesper" not in repos_processed
     assert repos_processed == ["autumngarage/cortex", "autumngarage/touchstone"]
+
+
+@pytest.mark.parametrize("stale_label", ["alchemist-test-error", "alchemist-test-declined"])
+def test_working_transition_removes_stale_state_labels_on_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_label: str
+):
+    issue = _issue(num=7, repo="autumngarage/touchstone")
+    issue = DispatchIssue(
+        number=issue.number,
+        title=issue.title,
+        body=issue.body,
+        url=issue.url,
+        repository=issue.repository,
+        updated_at=issue.updated_at,
+        labels=("alchemist-test", stale_label),
+    )
+    captured = _stub_all_external(monkeypatch, issues=[issue])
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    first_transition = captured["label_transitions"][0]
+    assert first_transition[first_transition.index("--add-label") + 1] == "alchemist-test-working"
+    removed = first_transition[first_transition.index("--remove-label") + 1].split(",")
+    assert "alchemist-test" in removed
+    assert stale_label in removed
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -925,6 +1033,7 @@ def _stuck_sweep_stub(
     monkeypatch: pytest.MonkeyPatch,
     *,
     stuck_items: list[dict],
+    label_transition_fails: bool = False,
 ):
     """Stub gh + label calls for testing _sweep_stuck in isolation."""
     captured: dict[str, list] = {
@@ -940,6 +1049,10 @@ def _stuck_sweep_stub(
             )
         if "issue" in cmd and "edit" in cmd:
             captured["label_transitions"].append(cmd)
+            if label_transition_fails:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=1, stdout="", stderr="label update failed"
+                )
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
         if "issue" in cmd and "comment" in cmd:
             captured["comments"].append(cmd)
@@ -981,6 +1094,31 @@ def test_sweep_stuck_transitions_old_working_issues(
     assert len(captured["label_transitions"]) == 1
 
 
+def test_sweep_stuck_label_failure_is_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Old stuck issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    _stuck_sweep_stub(monkeypatch, stuck_items=stuck, label_transition_fails=True)
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert "stuck-sweep" in results[0].error
+    assert "label-transition: label update failed" in results[0].error
+
+
 def test_sweep_stuck_respects_repo_blocklist(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -1017,6 +1155,32 @@ def test_sweep_stuck_respects_repo_blocklist(
     assert captured["comments"][0][captured["comments"][0].index("--repo") + 1] == (
         "autumngarage/touchstone"
     )
+
+
+def test_sweep_stuck_skips_repo_with_active_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.locks import acquire
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Actively processing",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+    config = _config(tmp_path, dry_run=False)
+
+    with acquire(tmp_path, "autumngarage/touchstone", stale_after_sec=3600):
+        results = _sweep_stuck(config)
+
+    assert results == []
+    assert captured["comments"] == []
+    assert captured["label_transitions"] == []
 
 
 def test_sweep_stuck_skips_recent_working_issues(
