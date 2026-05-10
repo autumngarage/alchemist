@@ -36,6 +36,14 @@ def test_brief_passes_through_title_and_body(tmp_path: Path):
     assert "Line 12 of README has a typo" in body
 
 
+def test_brief_requires_reading_referenced_file_before_editing(tmp_path: Path):
+    body = render_brief(_issue(), "autumngarage/touchstone", tmp_path)
+    assert "If the issue references a specific file or location" in body
+    assert "read that file before" in body
+    assert "Trivial fix" in body
+    assert "read the" in body and "target file" in body
+
+
 def test_brief_template_version_constant_exported():
     assert BRIEF_TEMPLATE_VERSION == "1"
 
