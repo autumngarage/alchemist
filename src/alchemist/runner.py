@@ -74,6 +74,12 @@ class RunResult:
     dry_run: bool
 
 
+@dataclass(frozen=True)
+class _MergeGateResult:
+    merged: bool
+    error: str | None = None
+
+
 def run_tick(config: Config) -> list[RunResult]:
     """Process one tick worth of dispatched issues.
 
@@ -379,7 +385,7 @@ def _process_locked(
     # number and waits for the result. CLEAN review → squash-merged. BLOCKED
     # review → PR stays open with review comments; needs human triage.
     try:
-        merged = _run_merge_pr(work_dir, pr_number, config.review_timeout_sec)
+        merge_gate = _run_merge_pr(work_dir, pr_number, config.review_timeout_sec)
     except _ToolError as exc:
         # merge-pr.sh subprocess died; the merge may have already landed.
         # Query the PR's actual state before reporting failure.
@@ -391,6 +397,19 @@ def _process_locked(
             return _result(
                 repo, issue.number, started, config,
                 pr_url=pr_url, merged=False, error=f"merge-pr: {exc}",
+            )
+    else:
+        merged = merge_gate.merged
+        if merge_gate.error:
+            label_error = _mark_merge_gate_error(repo, issue, pr_url, config, merge_gate.error)
+            return _result(
+                repo,
+                issue.number,
+                started,
+                config,
+                pr_url=pr_url,
+                merged=False,
+                error=label_error,
             )
 
     if merged:
@@ -1119,13 +1138,14 @@ def _resolve_touchstone_root() -> Path:
     raise _ToolError("touchstone scripts/merge-pr.sh not found")
 
 
-def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> bool:
+def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> _MergeGateResult:
     """Hand the PR to touchstone's merge-pr.sh (review + auto-merge gate).
 
-    Returns:
-        True  — touchstone reviewed CLEAN/FIXED and squash-merged the PR.
-        False — touchstone review BLOCKED or merge otherwise failed; PR stays
-                open with review comments for human triage.
+    Returns a classified result:
+        merged=True, error=None — touchstone reviewed CLEAN/FIXED and merged.
+        merged=False, error=None — touchstone review BLOCKED; PR stays open
+            with review comments for human triage.
+        merged=False, error=str — merge-gate infrastructure/preflight failure.
 
     Raises:
         _ToolError — couldn't locate or invoke merge-pr.sh at all.
@@ -1150,8 +1170,38 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> bool:
         print(f"merge-pr.sh exited {result.returncode}; tail of output:", file=sys.stderr)
         for line in tail_lines:
             print(f"  {line}", file=sys.stderr)
+        problem = _classify_merge_pr_failure(merged_output)
+        if problem is None:
+            return _MergeGateResult(merged=False)
+        return _MergeGateResult(
+            merged=False,
+            error=f"{problem}; exit={result.returncode}; tail={_merge_output_tail(merged_output)}",
+        )
 
-    return result.returncode == 0
+    return _MergeGateResult(merged=True)
+
+
+def _classify_merge_pr_failure(output: str) -> str | None:
+    """Return None for intentional review blocks; otherwise a fatal reason."""
+    lower = output.lower()
+    if "codex_review_blocked" in lower or "review blocked" in lower:
+        return None
+    if "push blocked" in lower and "conductor flagged issues" in lower:
+        return None
+    if "preflight" in lower:
+        return "preflight failed"
+    if "merge conflict" in lower or "not mergeable" in lower:
+        return "merge conflict"
+    if "gh:" in lower or "graphql" in lower or "api rate limit" in lower or "github api" in lower:
+        return "github api failure"
+    return "merge-pr.sh failed"
+
+
+def _merge_output_tail(output: str, *, max_lines: int = 8, max_chars: int = 800) -> str:
+    tail = "\n".join(output.splitlines()[-max_lines:]).strip()
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail or "(no output)"
 
 
 def _check_pr_merged(repo: str, pr_number: int) -> bool:
@@ -1275,6 +1325,30 @@ def _set_assignee(
         raise _GhError(
             result.stderr.strip() or f"gh issue edit assignee {action} exit {result.returncode}"
         )
+
+
+def _mark_merge_gate_error(
+    repo: str,
+    issue: DispatchIssue,
+    pr_url: str,
+    config: Config,
+    message: str,
+) -> str:
+    error = f"merge-pr: {message}"
+    if not config.dry_run:
+        _post_error_comment(
+            repo,
+            issue.number,
+            f"{error}\n\nPR remains open for human triage: {pr_url}",
+            config,
+        )
+        try:
+            _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
+        except _GhError as exc:
+            label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
+            error = f"{error}; {label_error}"
+    return error
 
 
 def _bail(
