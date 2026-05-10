@@ -97,15 +97,16 @@ def run_tick(config: Config) -> list[RunResult]:
             f"alchemist: doctor failed; skipping tick — {details}",
             file=sys.stderr,
         )
-        return []
+        return [_run_level_error(config, f"doctor: {details}")]
 
     sweep_results = _sweep_stuck(config)
+    remaining_issue_budget = max(0, config.max_issues_per_tick - len(sweep_results))
 
     try:
         issues = scan(org=config.org, label=config.dispatch_label)
     except Exception as exc:  # noqa: BLE001 — surface any scanner failure to operator
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
-        return sweep_results
+        return [*sweep_results, _run_level_error(config, f"scan: {exc}")]
 
     if config.repo_blocklist:
         skipped = [i for i in issues if i.repository in config.repo_blocklist]
@@ -117,14 +118,7 @@ def run_tick(config: Config) -> list[RunResult]:
                 )
         issues = [i for i in issues if i.repository not in config.repo_blocklist]
 
-    grouped: dict[str, list[DispatchIssue]] = defaultdict(list)
-    for issue in issues:
-        grouped[issue.repository].append(issue)
-
-    work: list[tuple[str, list[DispatchIssue]]] = [
-        (repo, sorted(group, key=lambda i: i.updated_at)[: config.max_per_repo_per_tick])
-        for repo, group in grouped.items()
-    ]
+    work = _select_work(issues, config, limit=remaining_issue_budget)
 
     if not work:
         return sweep_results
@@ -187,17 +181,53 @@ def _process_repo(
         ]
 
 
+def _select_work(
+    issues: list[DispatchIssue], config: Config, *, limit: int
+) -> list[tuple[str, list[DispatchIssue]]]:
+    """Select bounded work for this tick, preserving oldest-issue-first order.
+
+    Invariant: the returned issue count never exceeds the global tick limit,
+    and no repo receives more than `max_per_repo_per_tick`.
+    """
+    total_limit = max(0, limit)
+    per_repo_limit = max(0, config.max_per_repo_per_tick)
+    if total_limit == 0 or per_repo_limit == 0:
+        return []
+
+    selected: dict[str, list[DispatchIssue]] = {}
+    per_repo_counts: dict[str, int] = defaultdict(int)
+    selected_count = 0
+    for issue in sorted(issues, key=lambda i: (i.updated_at, i.repository, i.number)):
+        if selected_count >= total_limit:
+            break
+        if per_repo_counts[issue.repository] >= per_repo_limit:
+            continue
+        selected.setdefault(issue.repository, []).append(issue)
+        per_repo_counts[issue.repository] += 1
+        selected_count += 1
+    return list(selected.items())
+
+
 def _process_issue(issue: DispatchIssue, config: Config) -> RunResult:
     started = time.monotonic()
     try:
         return _process_locked(issue, config, started)
     except Exception as exc:  # noqa: BLE001 — every per-issue failure is recoverable
+        message = f"unhandled: {_sanitize_error_text(str(exc), token=config.github_token)}"
+        if not config.dry_run:
+            try:
+                return _bail(issue.repository, issue, started, config, message)
+            except Exception as bail_exc:  # noqa: BLE001 — preserve the original failure
+                message = (
+                    f"{message}; bail-failed: "
+                    f"{_sanitize_error_text(str(bail_exc), token=config.github_token)}"
+                )
         return RunResult(
             repo=issue.repository,
             issue_number=issue.number,
             pr_url=None,
             merged=None,
-            error=f"unhandled: {exc}",
+            error=message,
             elapsed_sec=time.monotonic() - started,
             dry_run=config.dry_run,
         )
@@ -379,7 +409,13 @@ class _ToolError(RuntimeError):
     pass
 
 
+class _SanitizedSubprocessError(subprocess.SubprocessError):
+    pass
+
+
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_AUTH_HEADER_RE = re.compile(r"Authorization:\s*Basic\s+[A-Za-z0-9+/=]+", re.IGNORECASE)
+_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -524,12 +560,21 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
     now = datetime.now(UTC)
     threshold = timedelta(seconds=_STUCK_SWEEP_THRESHOLD_SEC)
     swept: list[RunResult] = []
+    sweep_limit = max(0, config.max_issues_per_tick)
     for item in items:
+        if len(swept) >= sweep_limit:
+            break
         repo_obj = item.get("repository") or {}
         repo = repo_obj.get("nameWithOwner") or repo_obj.get("name") or ""
         issue_num = item.get("number")
         updated_str = item.get("updatedAt", "")
         if not (repo and issue_num and updated_str):
+            continue
+        if repo in config.repo_blocklist:
+            print(
+                f"alchemist: stuck-sweep skipping {repo}#{issue_num} (repo in blocklist)",
+                file=sys.stderr,
+            )
             continue
         try:
             updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
@@ -620,6 +665,41 @@ def _git_auth_prefix(token: str) -> list[str]:
     return ["git", "-c", f"http.extraheader=Authorization: Basic {encoded}"]
 
 
+def _sanitize_error_text(text: str, *, token: str | None = None) -> str:
+    """Redact auth material before writing logs, issue comments, or RunResult."""
+    sanitized = text
+    if token:
+        sanitized = sanitized.replace(token, "[redacted-token]")
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        sanitized = sanitized.replace(encoded, "[redacted-git-basic-auth]")
+    sanitized = _AUTH_HEADER_RE.sub("Authorization: Basic [redacted]", sanitized)
+    sanitized = re.sub(r"x-access-token:[^@\s]+", "x-access-token:[redacted]", sanitized)
+    return _GITHUB_TOKEN_RE.sub("[redacted-token]", sanitized)
+
+
+def _run_git_auth(
+    cmd: list[str], *, cwd: Path | None = None, token: str, timeout: int
+) -> None:
+    """Run an authenticated git command without leaking auth in exceptions."""
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise _SanitizedSubprocessError(
+            _sanitize_error_text(str(exc), token=token)
+        ) from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"git exit {result.returncode}"
+        raise _SanitizedSubprocessError(_sanitize_error_text(detail, token=token))
+
+
 def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> None:
     url = f"https://github.com/{repo}.git"  # plain URL — auth via header
     git_auth = _git_auth_prefix(token)
@@ -630,9 +710,9 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
             ["git", "remote", "set-url", "origin", url],
             cwd=dest, check=True, timeout=30,
         )
-        subprocess.run(  # noqa: S603,S607
+        _run_git_auth(
             [*git_auth, "fetch", "origin", default_branch, "--depth", "50"],
-            cwd=dest, check=True, timeout=120,
+            cwd=dest, token=token, timeout=120,
         )
         subprocess.run(  # noqa: S603,S607
             ["git", "reset", "--hard", f"origin/{default_branch}"],
@@ -647,9 +727,9 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(  # noqa: S603,S607
+    _run_git_auth(
         [*git_auth, "clone", "--depth", "50", "--branch", default_branch, url, str(dest)],
-        check=True, timeout=300,
+        token=token, timeout=300,
     )
 
 
@@ -658,6 +738,20 @@ def _make_branch(dest: Path, branch: str, base: str) -> None:
         ["git", "checkout", "-B", branch, base],
         cwd=dest, check=True, timeout=30,
     )
+
+
+def _conductor_env() -> dict[str, str]:
+    """Return the environment for the worker agent process.
+
+    Conductor needs normal process context and provider credentials, but not
+    Alchemist's GitHub/App credentials. The worker can edit files through its
+    tools; it should not also inherit orchestrator tokens.
+    """
+    env = dict(os.environ)
+    for key in list(env):
+        if key in {"GITHUB_TOKEN", "GH_TOKEN"} or key.startswith("ALCHEMIST_"):
+            env.pop(key, None)
+    return env
 
 
 def _run_conductor(
@@ -691,6 +785,7 @@ def _run_conductor(
             result = subprocess.run(  # noqa: S603,S607
                 cmd,
                 stdout=fh, stderr=subprocess.STDOUT,
+                env=_conductor_env(),
                 text=True,
                 timeout=timeout + 30,
                 check=False,
@@ -1030,9 +1125,9 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # but cheap insurance).
     _ = repo  # unused; origin already points at the right remote
     git_auth = _git_auth_prefix(token)
-    subprocess.run(  # noqa: S603,S607
+    _run_git_auth(
         [*git_auth, "push", "--set-upstream", "--force-with-lease", "origin", branch],
-        cwd=repo_dir, check=True, timeout=120,
+        cwd=repo_dir, token=token, timeout=120,
     )
 
 
@@ -1070,6 +1165,7 @@ def _post_activity_comment(
     """
     if config.dry_run:
         return
+    body = _sanitize_error_text(body, token=config.github_token)
     cmd = [
         "gh", "issue", "comment", str(issue_number),
         "--repo", repo,
@@ -1122,6 +1218,7 @@ def _bail(
     repo: str, issue: DispatchIssue, started: float, config: Config, message: str
 ) -> RunResult:
     """Common error path: post a comment, transition to error label, return result."""
+    message = _sanitize_error_text(message, token=config.github_token)
     if not config.dry_run:
         _post_error_comment(repo, issue.number, message, config)
         with contextlib.suppress(_GhError):
@@ -1180,6 +1277,17 @@ def _result(
         dry_run=config.dry_run,
     )
 
+
+def _run_level_error(config: Config, message: str) -> RunResult:
+    return RunResult(
+        repo=config.org,
+        issue_number=0,
+        pr_url=None,
+        merged=None,
+        error=_sanitize_error_text(message, token=config.github_token),
+        elapsed_sec=0.0,
+        dry_run=config.dry_run,
+    )
 
 
 __all__ = [

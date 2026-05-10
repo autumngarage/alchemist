@@ -18,6 +18,7 @@ def _config(
     state_dir: Path,
     *,
     dry_run: bool = True,
+    max_issues: int = 10,
     max_concurrent: int = 1,
     repo_blocklist: tuple[str, ...] = (),
 ) -> Config:
@@ -29,6 +30,7 @@ def _config(
         poll_interval_minutes=5,
         state_dir=state_dir,
         dry_run=dry_run,
+        max_issues_per_tick=max_issues,
         max_per_repo_per_tick=1,
         max_concurrent_repos=max_concurrent,
         conductor_timeout_sec=60,
@@ -66,6 +68,7 @@ def _stub_all_external(
     *,
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
+    git_auth_failure: bool = False,
     # "merged" | "blocked" | "missing" |
     # "timeout-but-actually-merged" | "timeout-and-not-merged"
     merge_outcome: str = "merged",
@@ -80,6 +83,7 @@ def _stub_all_external(
 
     captured: dict[str, list[Any]] = {
         "subprocess_run_args": [],
+        "subprocess_run_kwargs": [],
         "label_transitions": [],
         "label_creates": [],
         "assignee_changes": [],
@@ -96,6 +100,7 @@ def _stub_all_external(
 
     def fake_run(cmd, *args, **kwargs):
         captured["subprocess_run_args"].append(cmd)
+        captured["subprocess_run_kwargs"].append(kwargs)
 
         if "label" in cmd and "create" in cmd:
             captured["label_creates"].append(cmd)
@@ -155,6 +160,17 @@ def _stub_all_external(
             if conductor_outcome == "error":
                 return subprocess.CompletedProcess(args=cmd, returncode=2, stdout="", stderr="boom")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        if git_auth_failure and "git" in cmd and ("clone" in cmd or "fetch" in cmd):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=128,
+                stdout="",
+                stderr=(
+                    "fatal: Authentication failed with "
+                    "Authorization: Basic Z2hwX1NFQ1JFVA== ghp_SECRETLEAK"
+                ),
+            )
 
         if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
             if merge_outcome in ("timeout-but-actually-merged", "timeout-and-not-merged"):
@@ -353,14 +369,32 @@ def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert len(results) == 2
 
 
-def test_doctor_failure_returns_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_global_tick_cap_limits_total_issues(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    issues = [
+        _issue(num=1, repo="autumngarage/touchstone"),
+        _issue(num=2, repo="autumngarage/cortex"),
+        _issue(num=3, repo="autumngarage/vesper"),
+    ]
+    _stub_all_external(monkeypatch, issues=issues)
+    config = _config(tmp_path, dry_run=True, max_issues=1)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].repo == "autumngarage/touchstone"
+
+
+def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr("alchemist.runner.scan", lambda **_: [_issue()])
     monkeypatch.setattr(
         "alchemist.runner.run_doctor",
         lambda config: [Check(name="github auth", ok=False, detail="missing")],
     )
     config = _config(tmp_path)
-    assert run_tick(config) == []
+    results = run_tick(config)
+    assert len(results) == 1
+    assert results[0].issue_number == 0
+    assert results[0].error == "doctor: github auth: missing"
 
 
 def test_run_result_is_frozen():
@@ -613,6 +647,31 @@ def test_assignee_failure_does_not_block_run(
     assert any("claiming" in b for b in bodies)
 
 
+def test_unexpected_issue_exception_transitions_to_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch)
+    monkeypatch.setattr(
+        "alchemist.runner.render_brief",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("brief exploded")),
+    )
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("unhandled: brief exploded")
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-error" in labels_added
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("unhandled: brief exploded" in b for b in bodies)
+
+
 # --------------------------------------------------------------------------- #
 # Credential hygiene (alchemist#38)                                           #
 # --------------------------------------------------------------------------- #
@@ -669,6 +728,52 @@ def test_git_auth_prefix_uses_basic_header_with_x_access_token():
     assert prefix[:2] == ["git", "-c"]
     expected_encoded = base64.b64encode(b"x-access-token:ghs_install123").decode()
     assert prefix[2] == f"http.extraheader=Authorization: Basic {expected_encoded}"
+
+
+def test_git_auth_failures_are_sanitized_before_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_SECRETLEAK0123456789abcdef")
+    captured = _stub_all_external(monkeypatch, git_auth_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    combined = "\n".join([results[0].error, *bodies])
+    assert "ghp_SECRETLEAK" not in combined
+    assert "Z2hwX1NFQ1JFVA==" not in combined
+    assert "[redacted" in combined
+
+
+def test_conductor_worker_env_excludes_orchestrator_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_orchestrator")
+    monkeypatch.setenv("GH_TOKEN", "ghp_gh_cli")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "private-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-provider")
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=True)
+
+    run_tick(config)
+
+    conductor_envs = [
+        kwargs.get("env")
+        for cmd, kwargs in zip(
+            captured["subprocess_run_args"], captured["subprocess_run_kwargs"], strict=False
+        )
+        if "conductor" in cmd and "exec" in cmd
+    ]
+    assert len(conductor_envs) == 1
+    env = conductor_envs[0]
+    assert env is not None
+    assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
+    assert "ALCHEMIST_APP_PRIVATE_KEY" not in env
+    assert env["OPENROUTER_API_KEY"] == "sk-provider"
 
 
 # --------------------------------------------------------------------------- #
@@ -874,6 +979,44 @@ def test_sweep_stuck_transitions_old_working_issues(
     # Comment posted + label transition fired.
     assert len(captured["comments"]) == 1
     assert len(captured["label_transitions"]) == 1
+
+
+def test_sweep_stuck_respects_repo_blocklist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [
+        {
+            "number": 42,
+            "title": "Blocked repo",
+            "repository": {"nameWithOwner": "autumngarage/vesper"},
+            "updatedAt": old_ts,
+        },
+        {
+            "number": 43,
+            "title": "Allowed repo",
+            "repository": {"nameWithOwner": "autumngarage/touchstone"},
+            "updatedAt": old_ts,
+        },
+    ]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+    config = _config(
+        tmp_path,
+        dry_run=False,
+        repo_blocklist=("autumngarage/vesper",),
+    )
+
+    results = _sweep_stuck(config)
+
+    assert [r.repo for r in results] == ["autumngarage/touchstone"]
+    assert len(captured["comments"]) == 1
+    assert captured["comments"][0][captured["comments"][0].index("--repo") + 1] == (
+        "autumngarage/touchstone"
+    )
 
 
 def test_sweep_stuck_skips_recent_working_issues(

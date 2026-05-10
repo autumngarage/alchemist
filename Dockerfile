@@ -14,8 +14,8 @@
 
 FROM python:3.12-slim AS base
 
-ARG TOUCHSTONE_VERSION=v2.7.0
-ARG CONDUCTOR_VERSION=v0.10.1
+ARG TOUCHSTONE_VERSION=v2.11.8
+ARG CONDUCTOR_VERSION=v0.10.18
 # hatch-vcs reads the version from git history; the build context excludes
 # .git so we pin a pretend-version. CI release builds override via --build-arg
 # so the published image matches the tag.
@@ -64,7 +64,7 @@ RUN git clone --depth 50 --branch ${TOUCHSTONE_VERSION} \
 # Conductor: cloned from source at a pinned tag (it isn't published on PyPI
 # under the name `conductor`), then pipx-installed from the local checkout.
 # Mirrors the brew formula's install path.
-RUN git clone --depth 50 --branch ${CONDUCTOR_VERSION}
+RUN git clone --depth 50 --branch ${CONDUCTOR_VERSION} \
         https://github.com/autumngarage/conductor.git /opt/conductor \
  && pipx install /opt/conductor
 
@@ -75,12 +75,12 @@ COPY src ./src
 COPY scripts ./scripts
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${ALCHEMIST_VERSION}
 RUN pipx install . \
+ && chmod +x scripts/railway-entrypoint.sh \
  && rm -rf /root/.cache/pip /root/.cache/uv
 
 # Persistent state lives outside the image; Railway mounts a volume here.
 RUN mkdir -p /var/alchemist/state
 
-# Default to a single tick: doctor, then scan in JSON. Auth (App installation
-# token vs PAT) is resolved internally by alchemist's CLI commands themselves,
-# so this CMD does not need a shell wrapper. See alchemist#6.
-CMD ["bash", "-c", "alchemist doctor --json && alchemist scan --json"]
+# Default to a single tick. Auth (App installation token vs PAT) is resolved
+# internally by alchemist's CLI, so startup must not require GITHUB_TOKEN.
+CMD ["bash", "scripts/railway-entrypoint.sh"]

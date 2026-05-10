@@ -57,11 +57,13 @@ or `/etc/alchemist/config.toml` for the Railway deploy):
 org = "autumngarage"
 poll_interval_minutes = 5
 default_budget = "$2"
-default_provider = "kimi"
+default_provider = "openrouter"
 dispatch_label = "alchemist-test"  # flip to "alchemist-dispatch" after dogfood
 dry_run = true                     # flip to false after dogfood A
 state_dir = "/var/alchemist/state"
-max_per_tick = 1                   # bounded blast radius for the first week
+max_issues_per_tick = 1            # global blast-radius cap for the first week
+max_per_repo_per_tick = 1
+max_concurrent_repos = 1
 ```
 
 `default_budget` caps conductor spend per dispatched issue. After conductor
@@ -71,14 +73,17 @@ exceeded it — the issue lands in `-error` for human triage. Set to `"$0"` or
 empty to disable enforcement.
 
 Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
-`ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`, `ALCHEMIST_MAX_PER_TICK`.
+`ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`,
+`ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
+`ALCHEMIST_MAX_CONCURRENT_REPOS`.
 
 Required externally:
-- `GITHUB_TOKEN` — fine-grained PAT (or GitHub App installation token) with
-  `issues:rw`, `pull_requests:rw`, `contents:rw` on repos in the configured org.
-- `OPENROUTER_API_KEY` — for Conductor's kimi/deepseek/openrouter providers when
-  running headless. Conductor's `claude`/`codex` providers use OAuth-via-CLI and
-  do not work in a non-interactive container.
+- GitHub auth — either `GITHUB_TOKEN` with `issues:rw`, `pull_requests:rw`,
+  `contents:rw`, or GitHub App env vars (`ALCHEMIST_APP_ID`,
+  `ALCHEMIST_APP_INSTALLATION_ID`, `ALCHEMIST_APP_PRIVATE_KEY`) so Alchemist can
+  mint an installation token per tick.
+- `OPENROUTER_API_KEY` — for Conductor's default `openrouter` provider when
+  running headless.
 
 ## Going live (the dogfood gates)
 
@@ -88,8 +93,9 @@ Three transitions, each manual. The tool never auto-graduates.
    Verify cron tick + log output. No side effects.
 2. **Dogfood B** — `dry_run=false`, label still `alchemist-test`. File one tiny
    test issue. Real PR opens. Inspect and merge or reject.
-3. **Live** — flip `dispatch_label` to `alchemist-dispatch`. `max_concurrent_repos=1`
-   for one week, then lift to 3 to enable cross-repo swarm.
+3. **Live** — flip `dispatch_label` to `alchemist-dispatch`. Keep
+   `max_issues_per_tick=1` and `max_concurrent_repos=1` for one week, then lift
+   them deliberately to enable cross-repo swarm.
 
 Full operator walkthrough including Railway provisioning, common failure modes,
 and tuning knobs lives at [`docs/operator-runbook.md`](docs/operator-runbook.md).

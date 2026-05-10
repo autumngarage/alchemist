@@ -33,6 +33,7 @@ class Config:
     poll_interval_minutes: int
     state_dir: Path
     dry_run: bool
+    max_issues_per_tick: int     # global issue cap across sweep + normal dispatch
     max_per_repo_per_tick: int   # how many issues to take from any one repo per tick
     max_concurrent_repos: int     # how many repos to fan out across in parallel
     conductor_timeout_sec: int
@@ -92,9 +93,10 @@ _DEFAULTS: dict[str, object] = {
     "poll_interval_minutes": 5,
     "state_dir": "/var/alchemist/state",
     "dry_run": True,
-    # Bounded blast radius for the dogfood period: 1 issue per repo, 1 repo at
-    # a time. After dogfood B is clean, lift max_concurrent_repos to e.g. 3
-    # to enable cross-repo swarm.
+    # Bounded blast radius for the dogfood period: 1 issue total, 1 issue per
+    # repo, 1 repo at a time. After dogfood B is clean, lift these caps to
+    # enable cross-repo swarm without changing code.
+    "max_issues_per_tick": 1,
     "max_per_repo_per_tick": 1,
     "max_concurrent_repos": 1,
     "conductor_timeout_sec": 600,
@@ -200,6 +202,7 @@ def load_config() -> Config:
         "ALCHEMIST_POLL_INTERVAL_MINUTES": "poll_interval_minutes",
         "ALCHEMIST_STATE_DIR": "state_dir",
         "ALCHEMIST_DRY_RUN": "dry_run",
+        "ALCHEMIST_MAX_ISSUES_PER_TICK": "max_issues_per_tick",
         "ALCHEMIST_MAX_PER_REPO_PER_TICK": "max_per_repo_per_tick",
         "ALCHEMIST_MAX_CONCURRENT_REPOS": "max_concurrent_repos",
         "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
@@ -224,6 +227,7 @@ def load_config() -> Config:
         poll_interval_minutes=_coerce_int(merged["poll_interval_minutes"]),
         state_dir=Path(str(merged["state_dir"])),
         dry_run=_coerce_bool(merged["dry_run"]),
+        max_issues_per_tick=_coerce_int(merged["max_issues_per_tick"]),
         max_per_repo_per_tick=_coerce_int(merged["max_per_repo_per_tick"]),
         max_concurrent_repos=_coerce_int(merged["max_concurrent_repos"]),
         conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
