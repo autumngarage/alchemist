@@ -70,7 +70,7 @@ def _stub_all_external(
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
     git_auth_failure: bool = False,
     label_transition_fail_on: str | None = None,
-    # "merged" | "blocked" | "missing" |
+    # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
     # "timeout-but-actually-merged" | "timeout-and-not-merged"
     merge_outcome: str = "merged",
 ):
@@ -203,8 +203,30 @@ def _stub_all_external(
         if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
             if merge_outcome in ("timeout-but-actually-merged", "timeout-and-not-merged"):
                 raise subprocess.TimeoutExpired(cmd, timeout=10)
-            rc = 0 if merge_outcome == "merged" else 1
-            return subprocess.CompletedProcess(args=cmd, returncode=rc, stdout="", stderr="")
+            if merge_outcome == "merged":
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+            if merge_outcome == "blocked":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="PUSH BLOCKED\nConductor flagged issues\nCODEX_REVIEW_BLOCKED\n",
+                    stderr="",
+                )
+            if merge_outcome == "preflight-failed":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="deterministic preflight failed\nruff check failed\n",
+                    stderr="",
+                )
+            if merge_outcome == "infra-error":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr="gh: GraphQL: API rate limit exceeded\n",
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
 
         # Everything else (git clone/checkout/fetch/reset/clean/add/commit, brew prefix)
         return subprocess.CompletedProcess(
@@ -290,6 +312,47 @@ def test_merge_blocked_leaves_pr_open_for_human_triage(
     assert r.error is None
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
     assert r.merged is False  # touchstone blocked the merge; PR stays open
+    assert len(captured["pr_creates"]) == 1
+
+
+def test_merge_preflight_failure_is_fatal_with_pr_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, merge_outcome="preflight-failed")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is False
+    assert r.error is not None
+    assert "merge-pr: preflight failed" in r.error
+    assert len(captured["pr_creates"]) == 1
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-error" in labels_added
+
+
+def test_merge_infra_failure_is_fatal_with_pr_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, merge_outcome="infra-error")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is False
+    assert r.error is not None
+    assert "merge-pr: github api failure" in r.error
+    assert "API rate limit exceeded" in r.error
     assert len(captured["pr_creates"]) == 1
 
 
