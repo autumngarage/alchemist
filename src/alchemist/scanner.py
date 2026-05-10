@@ -1,8 +1,9 @@
 """Issue scanner — finds labelled issues across all repos in an org.
 
-Single GitHub search query: `gh search issues --owner <org> --label <label> --state open`.
-Returns all matching issues across every repo in the org. Auto-picks-up new repos,
-auto-drops archived ones. The org is the unit of scoping.
+Single GitHub search query:
+`gh search issues --owner <org> --label <label> --state open --archived=false`.
+Returns matching issues across every active repo in the org. Auto-picks-up new
+repos, auto-drops archived ones. The org is the unit of scoping.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def scan(
     *,
     org: str,
     label: str,
+    limit: int = 1000,
     gh_bin: str = "gh",
     extra_args: tuple[str, ...] = (),
 ) -> list[DispatchIssue]:
@@ -41,11 +43,15 @@ def scan(
     Raises ScanError on non-zero gh exit. Returns an empty list when there
     are no matches (gh emits `[]`).
     """
+    if limit < 1:
+        raise ScanError("scan limit must be at least 1")
     cmd: list[str] = [
         gh_bin, "search", "issues",
         "--owner", org,
         "--label", label,
         "--state", "open",
+        "--archived=false",
+        "--limit", str(limit),
         "--json", "number,title,body,url,repository,updatedAt,labels",
         *extra_args,
     ]
