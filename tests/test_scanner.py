@@ -58,6 +58,27 @@ def test_scan_invokes_gh_with_correct_args(monkeypatch: pytest.MonkeyPatch):
     assert "autumngarage" in captured["cmd"]
     assert "--label" in captured["cmd"]
     assert "alchemist-test" in captured["cmd"]
+    assert "--archived=false" in captured["cmd"]
+    assert "--limit" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--limit") + 1] == "1000"
+
+
+def test_scan_accepts_explicit_limit(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    scan(org="autumngarage", label="alchemist-test", limit=42)
+    assert captured["cmd"][captured["cmd"].index("--limit") + 1] == "42"
+
+
+def test_scan_rejects_invalid_limit():
+    with pytest.raises(ScanError, match="limit"):
+        scan(org="autumngarage", label="alchemist-test", limit=0)
 
 
 def test_scan_raises_on_gh_nonzero_exit(monkeypatch: pytest.MonkeyPatch):
