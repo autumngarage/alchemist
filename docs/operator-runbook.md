@@ -72,6 +72,7 @@ railway variable set ALCHEMIST_ORG="$YOUR_ORG" --service alchemist-cron
 railway variable set ALCHEMIST_DRY_RUN=true --service alchemist-cron
 railway variable set ALCHEMIST_LABEL=alchemist-test --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
+railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=1 --service alchemist-cron
 ```
 
 To verify auth before deploying, run `alchemist auth-token` locally with the same env set — it prints either the minted installation token (Path B) or the PAT (Path A), and exits 1 if neither is configured.
@@ -161,10 +162,11 @@ done
 
 **What changes:** real users on the org can label any issue `alchemist-dispatch` to trigger the loop.
 
-**For the first week, keep:** `max_per_repo_per_tick=1` and `max_concurrent_repos=1` (the defaults). Bounds blast radius if a brief-rendering bug or prompt-injection slips through.
+**For the first week, keep:** `max_issues_per_tick=1`, `max_per_repo_per_tick=1`, and `max_concurrent_repos=1` (the defaults). Bounds blast radius if a brief-rendering bug or prompt-injection slips through.
 
-After a week of clean operation, lift `max_concurrent_repos` to 3 to enable cross-repo swarm:
+After a week of clean operation, lift the global cap and concurrent repos together to enable cross-repo swarm:
 ```bash
+railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=3 --service alchemist-cron
 railway variable set ALCHEMIST_MAX_CONCURRENT_REPOS=3 --service alchemist-cron
 ```
 
@@ -242,6 +244,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_DRY_RUN` | `true` | Skip mutations (no push, PR, label transitions) |
 | `ALCHEMIST_PROVIDER` | `openrouter` | Conductor provider for the agent loop |
 | `ALCHEMIST_BUDGET` | `$2` | Per-issue cost cap (USD); `$0` or empty disables |
+| `ALCHEMIST_MAX_ISSUES_PER_TICK` | `1` | Global issues mutated per tick, including stuck sweeps |
 | `ALCHEMIST_MAX_PER_REPO_PER_TICK` | `1` | Issues from one repo per tick |
 | `ALCHEMIST_MAX_CONCURRENT_REPOS` | `1` | Repos processed in parallel (cross-repo swarm) |
 | `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Hard timeout on `conductor exec` |

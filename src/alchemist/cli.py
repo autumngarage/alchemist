@@ -87,6 +87,7 @@ def doctor(as_json: bool) -> None:
                 "dispatch_label": config.dispatch_label,
                 "default_provider": config.default_provider,
                 "dry_run": config.dry_run,
+                "max_issues_per_tick": config.max_issues_per_tick,
                 "max_per_repo_per_tick": config.max_per_repo_per_tick,
                 "max_concurrent_repos": config.max_concurrent_repos,
                 "state_dir": str(config.state_dir),
@@ -102,6 +103,7 @@ def doctor(as_json: bool) -> None:
         click.echo(f"  dispatch label:  {config.dispatch_label}")
         click.echo(f"  default provider: {config.default_provider}")
         click.echo(f"  dry run:         {config.dry_run}")
+        click.echo(f"  max issues:      {config.max_issues_per_tick}")
         click.echo(f"  max per repo:    {config.max_per_repo_per_tick}")
         click.echo(f"  max repos:       {config.max_concurrent_repos}")
         click.echo(f"  state dir:       {config.state_dir}")
