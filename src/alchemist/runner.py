@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from alchemist.briefs import BRIEF_TEMPLATE_VERSION, render_brief, render_pr_body
 from alchemist.doctor import run_doctor
-from alchemist.locks import LockBusyError, acquire
+from alchemist.locks import LockBusyError, acquire, is_locked
 from alchemist.reporter import report_tool_failure
 from alchemist.scanner import DispatchIssue, scan
 
@@ -53,11 +53,11 @@ _GIT_AUTHOR_NAME = "Alchemist"
 _GIT_AUTHOR_EMAIL = "alchemist@autumngarage.dev"
 _PR_TITLE_PREFIX = "[alchemist]"
 
-# Stuck-state sweep threshold: an issue stuck in `<dispatch>-working` for
-# longer than this is considered orphaned by a crashed tick. Conservatively
-# wider than the worst-case healthy tick (conductor 600s + review 900s + a
-# small buffer) so we don't sweep an active worker.
-_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
+# Stuck-state sweep/lock lease threshold is derived from the configured worker
+# and merge-review timeouts plus a small buffer. Never use less than the legacy
+# 30-minute floor while dogfooding.
+_MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
+_STUCK_SWEEP_MARGIN_SEC = 10 * 60
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
@@ -164,7 +164,12 @@ def _process_repo(
 
     note = f"{len(issues)} issue(s); first=#{issues[0].number}"
     try:
-        with acquire(config.state_dir, repo, holder_note=note):
+        with acquire(
+            config.state_dir,
+            repo,
+            holder_note=note,
+            stale_after_sec=_stuck_sweep_threshold_sec(config),
+        ):
             return [_process_issue(issue, config) for issue in issues]
     except LockBusyError as exc:
         return [
@@ -206,6 +211,13 @@ def _select_work(
         per_repo_counts[issue.repository] += 1
         selected_count += 1
     return list(selected.items())
+
+
+def _stuck_sweep_threshold_sec(config: Config) -> int:
+    return max(
+        _MIN_STUCK_SWEEP_THRESHOLD_SEC,
+        config.conductor_timeout_sec + config.review_timeout_sec + _STUCK_SWEEP_MARGIN_SEC,
+    )
 
 
 def _process_issue(issue: DispatchIssue, config: Config) -> RunResult:
@@ -387,12 +399,17 @@ def _process_locked(
             f"alchemist: shipped — see {pr_url}",
             config,
         )
-        with contextlib.suppress(_GhError):
+        shipped_label_error = None
+        try:
             _set_label(repo, issue.number, _shipped_label(config.dispatch_label), config)
+        except _GhError as exc:
+            shipped_label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue.number}: {shipped_label_error}", file=sys.stderr)
 
     return _result(
         repo, issue.number, started, config,
         pr_url=pr_url, merged=merged,
+        error=shipped_label_error if merged else None,
     )
 
 
@@ -448,6 +465,17 @@ def _error_label(dispatch: str) -> tuple[str, str]:
     working = _working_label(dispatch)[1]
     add = dispatch.replace("-dispatch", "-error").replace("-test", "-test-error")
     return working, add
+
+
+def _state_labels(dispatch_label: str) -> tuple[str, ...]:
+    """All labels in Alchemist's state machine for one dispatch label."""
+    return (
+        dispatch_label,
+        _working_label(dispatch_label)[1],
+        _shipped_label(dispatch_label)[1],
+        _declined_label(dispatch_label)[1],
+        _error_label(dispatch_label)[1],
+    )
 
 
 _LABEL_PALETTE: tuple[tuple[str, str, str], ...] = (
@@ -558,7 +586,8 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
         return []
 
     now = datetime.now(UTC)
-    threshold = timedelta(seconds=_STUCK_SWEEP_THRESHOLD_SEC)
+    stale_after_sec = _stuck_sweep_threshold_sec(config)
+    threshold = timedelta(seconds=stale_after_sec)
     swept: list[RunResult] = []
     sweep_limit = max(0, config.max_issues_per_tick)
     for item in items:
@@ -573,6 +602,12 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
         if repo in config.repo_blocklist:
             print(
                 f"alchemist: stuck-sweep skipping {repo}#{issue_num} (repo in blocklist)",
+                file=sys.stderr,
+            )
+            continue
+        if is_locked(config.state_dir, repo, stale_after_sec=stale_after_sec):
+            print(
+                f"alchemist: stuck-sweep skipping {repo}#{issue_num} (active repo lock)",
                 file=sys.stderr,
             )
             continue
@@ -595,8 +630,12 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
             "Inspect any outstanding branches before retrying.",
             config,
         )
-        with contextlib.suppress(_GhError):
+        label_error = None
+        try:
             _set_label(repo, issue_num, _error_label(config.dispatch_label), config)
+        except _GhError as exc:
+            label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue_num}: {label_error}", file=sys.stderr)
 
         swept.append(
             RunResult(
@@ -604,7 +643,11 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
                 issue_number=issue_num,
                 pr_url=None,
                 merged=None,
-                error=f"stuck-sweep: {message}",
+                error=(
+                    f"stuck-sweep: {message}; {label_error}"
+                    if label_error
+                    else f"stuck-sweep: {message}"
+                ),
                 elapsed_sec=0.0,
                 dry_run=config.dry_run,
             )
@@ -615,16 +658,36 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
 def _set_label(repo: str, issue_number: int, transition: tuple[str, str], config: Config) -> None:
     if config.dry_run:
         return
-    remove, add = transition
+    _remove, add = transition
+    current_state_labels = _current_state_labels(repo, issue_number, config.dispatch_label)
+    to_remove = sorted(label for label in current_state_labels if label != add)
     cmd = [
         "gh", "issue", "edit", str(issue_number),
         "--repo", repo,
-        "--remove-label", remove,
-        "--add-label", add,
     ]
+    if to_remove:
+        cmd.extend(["--remove-label", ",".join(to_remove)])
+    if add not in current_state_labels:
+        cmd.extend(["--add-label", add])
+    if len(cmd) == 6:
+        return
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # noqa: S603
     if result.returncode != 0:
         raise _GhError(result.stderr.strip() or f"gh issue edit exit {result.returncode}")
+
+
+def _current_state_labels(repo: str, issue_number: int, dispatch_label: str) -> set[str]:
+    expected = set(_state_labels(dispatch_label))
+    cmd = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "labels",
+        "--jq", ".labels[].name",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # noqa: S603
+    if result.returncode != 0:
+        raise _GhError(result.stderr.strip() or f"gh issue view labels exit {result.returncode}")
+    return {label.strip() for label in result.stdout.splitlines() if label.strip() in expected}
 
 
 def _default_branch(repo: str) -> str:
@@ -1219,11 +1282,16 @@ def _bail(
 ) -> RunResult:
     """Common error path: post a comment, transition to error label, return result."""
     message = _sanitize_error_text(message, token=config.github_token)
+    label_error: str | None = None
     if not config.dry_run:
         _post_error_comment(repo, issue.number, message, config)
-        with contextlib.suppress(_GhError):
+        try:
             _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
-    return _result(repo, issue.number, started, config, error=message)
+        except _GhError as exc:
+            label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
+    error = f"{message}; {label_error}" if label_error else message
+    return _result(repo, issue.number, started, config, error=error)
 
 
 def _decline(
@@ -1236,6 +1304,7 @@ def _decline(
     Comment frames it as a deliberate decline, label transitions to
     `<dispatch>-declined` (not `-error`), so the audit trail is honest.
     """
+    label_error: str | None = None
     if not config.dry_run:
         _post_activity_comment(
             repo, issue.number,
@@ -1246,14 +1315,25 @@ def _decline(
             f"`{config.dispatch_label}`.",
             config,
         )
-        with contextlib.suppress(_GhError):
+        try:
             _set_label(
                 repo, issue.number,
                 _declined_label(config.dispatch_label),
                 config,
             )
+        except _GhError as exc:
+            label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
     # Keep error= populated so logs surface it; cli.py's benign_prefixes
     # already includes "conductor produced no diff" so the process exits 0.
+    if label_error:
+        return _result(
+            repo,
+            issue.number,
+            started,
+            config,
+            error=f"{label_error}; decline: {message}",
+        )
     return _result(repo, issue.number, started, config, error=message)
 
 
