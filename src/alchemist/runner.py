@@ -1233,24 +1233,68 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # header — never embed the token in the URL. See _git_auth_prefix.
     #
     # Stale remote branches are expected after retrying a crashed tick or
-    # closed PR. Delete first, then push normally. This avoids
-    # `--force-with-lease` rejecting on fresh clones that never fetched the
-    # remote `alchemist/issue-*` ref (alchemist#59).
+    # closed PR. Fetch the exact remote branch ref first, then lease against
+    # that SHA. If no remote branch exists, push normally. This avoids the
+    # fresh-clone `--force-with-lease` rejection from alchemist#59 without
+    # deleting the previous recovery branch before the replacement push
+    # succeeds.
     _ = repo  # unused; origin already points at the right remote
     git_auth = _git_auth_prefix(token)
+    _refresh_remote_branch_ref(repo_dir, branch, token)
+    remote_oid = _remote_branch_oid(repo_dir, branch)
+    force_option = (
+        [f"--force-with-lease=refs/heads/{branch}:{remote_oid}"]
+        if remote_oid
+        else []
+    )
+    _run_git_auth(
+        [*git_auth, "push", "--set-upstream", *force_option, "origin", branch],
+        cwd=repo_dir, token=token, timeout=120,
+    )
+
+
+def _refresh_remote_branch_ref(repo_dir: Path, branch: str, token: str) -> None:
+    """Best-effort refresh of `origin/<branch>` for force-with-lease."""
+    remote_ref = f"refs/remotes/origin/{branch}"
     with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
         subprocess.run(  # noqa: S603,S607
-            [*git_auth, "push", "origin", "--delete", branch],
+            ["git", "update-ref", "-d", remote_ref],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    git_auth = _git_auth_prefix(token)
+    refspec = f"+refs/heads/{branch}:{remote_ref}"
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603,S607
+            [*git_auth, "fetch", "origin", refspec, "--depth", "1"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
-    _run_git_auth(
-        [*git_auth, "push", "--set-upstream", "origin", branch],
-        cwd=repo_dir, token=token, timeout=120,
-    )
+
+
+def _remote_branch_oid(repo_dir: Path, branch: str) -> str | None:
+    remote_ref = f"refs/remotes/origin/{branch}"
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            ["git", "rev-parse", "--verify", remote_ref],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    oid = result.stdout.strip()
+    return oid or None
 
 
 def _make_pr(

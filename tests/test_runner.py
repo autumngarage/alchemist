@@ -70,7 +70,7 @@ def _stub_all_external(
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
     git_auth_failure: bool = False,
-    push_delete_failure: bool = False,
+    remote_branch_exists: bool = True,
     push_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
@@ -95,9 +95,11 @@ def _stub_all_external(
         "label_creates": [],
         "assignee_changes": [],
         "activity_comments": [],
+        "remote_branch_fetches": [],
         "push_calls": [],
         "pr_creates": [],
     }
+    remote_branch_oid = "0123456789abcdef0123456789abcdef01234567"
 
     monkeypatch.setattr("alchemist.runner.scan", lambda **_: list(issues))
     monkeypatch.setattr(
@@ -177,15 +179,44 @@ def _stub_all_external(
                 args=cmd, returncode=1, stdout="", stderr="not found"
             )
 
-        if "git" in cmd and "push" in cmd:
-            captured["push_calls"].append(cmd)
-            if "--delete" in cmd and push_delete_failure:
+        if git_auth_failure and "git" in cmd and ("clone" in cmd or "fetch" in cmd):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=128,
+                stdout="",
+                stderr=(
+                    "fatal: Authentication failed with "
+                    "Authorization: Basic Z2hwX1NFQ1JFVA== ghp_SECRETLEAK"
+                ),
+            )
+
+        if "git" in cmd and "fetch" in cmd and any(
+            str(part).startswith("+refs/heads/alchemist/") for part in cmd
+        ):
+            captured["remote_branch_fetches"].append(cmd)
+            if not remote_branch_exists:
                 return subprocess.CompletedProcess(
                     args=cmd,
                     returncode=1,
                     stdout="",
-                    stderr="remote ref does not exist",
+                    stderr="fatal: couldn't find remote ref",
                 )
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        if "git" in cmd and "rev-parse" in cmd and any(
+            str(part).startswith("refs/remotes/origin/alchemist/") for part in cmd
+        ):
+            if remote_branch_exists:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=f"{remote_branch_oid}\n", stderr=""
+                )
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        if "git" in cmd and "update-ref" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        if "git" in cmd and "push" in cmd:
+            captured["push_calls"].append(cmd)
             if "--set-upstream" in cmd and push_create_failure:
                 return subprocess.CompletedProcess(
                     args=cmd,
@@ -208,17 +239,6 @@ def _stub_all_external(
             if conductor_outcome == "error":
                 return subprocess.CompletedProcess(args=cmd, returncode=2, stdout="", stderr="boom")
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-        if git_auth_failure and "git" in cmd and ("clone" in cmd or "fetch" in cmd):
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=128,
-                stdout="",
-                stderr=(
-                    "fatal: Authentication failed with "
-                    "Authorization: Basic Z2hwX1NFQ1JFVA== ghp_SECRETLEAK"
-                ),
-            )
 
         if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
             if merge_outcome in ("timeout-but-actually-merged", "timeout-and-not-merged"):
@@ -296,10 +316,13 @@ def test_live_happy_path_pushes_and_opens_pr(monkeypatch: pytest.MonkeyPatch, tm
     assert r.error is None
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
     assert r.merged is True
-    assert len(captured["push_calls"]) == 2
-    assert "--delete" in captured["push_calls"][0]
-    assert "--set-upstream" in captured["push_calls"][1]
-    assert "--force-with-lease" not in captured["push_calls"][1]
+    assert len(captured["remote_branch_fetches"]) == 1
+    assert len(captured["push_calls"]) == 1
+    assert "--set-upstream" in captured["push_calls"][0]
+    assert any(
+        str(part).startswith("--force-with-lease=refs/heads/alchemist/")
+        for part in captured["push_calls"][0]
+    )
     assert len(captured["pr_creates"]) == 1
     # working transition + shipped transition
     assert len(captured["label_transitions"]) == 2
@@ -309,10 +332,10 @@ def test_live_happy_path_pushes_and_opens_pr(monkeypatch: pytest.MonkeyPatch, tm
     assert pr_create[title_idx].startswith("[alchemist]")
 
 
-def test_stale_branch_delete_failure_does_not_block_push(
+def test_missing_remote_branch_pushes_without_force_with_lease(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    captured = _stub_all_external(monkeypatch, push_delete_failure=True)
+    captured = _stub_all_external(monkeypatch, remote_branch_exists=False)
     config = _config(tmp_path, dry_run=False)
 
     results = run_tick(config)
@@ -320,9 +343,13 @@ def test_stale_branch_delete_failure_does_not_block_push(
     assert len(results) == 1
     assert results[0].error is None
     assert results[0].pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
-    assert len(captured["push_calls"]) == 2
-    assert "--delete" in captured["push_calls"][0]
-    assert "--set-upstream" in captured["push_calls"][1]
+    assert len(captured["remote_branch_fetches"]) == 1
+    assert len(captured["push_calls"]) == 1
+    assert "--set-upstream" in captured["push_calls"][0]
+    assert not any(
+        str(part).startswith("--force-with-lease=")
+        for part in captured["push_calls"][0]
+    )
     assert len(captured["pr_creates"]) == 1
 
 
