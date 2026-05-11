@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -35,3 +36,14 @@ def test_railway_entrypoint_runs_tick_without_pat(tmp_path: Path):
     assert "Starting Alchemist Tick" in result.stdout
     assert "alchemist run-once --json" in result.stdout
     assert "Tool Refresh" not in result.stdout
+
+
+def test_railway_image_uses_uv_new_enough_for_dynamic_project_versions():
+    """Old uv builds failed `uv sync` on hatch-vcs/dynamic-version projects."""
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text()
+    match = re.search(r"^ARG UV_VERSION=([0-9]+)\.([0-9]+)\.([0-9]+)$", dockerfile, re.M)
+
+    assert match is not None
+    major, minor, patch = (int(part) for part in match.groups())
+    assert (major, minor, patch) >= (0, 11, 0)
