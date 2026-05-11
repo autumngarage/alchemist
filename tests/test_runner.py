@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,8 @@ def _stub_all_external(
     issues: list[DispatchIssue] | None = None,
     conductor_outcome: str = "ok",  # "ok" | "no-diff" | "timeout" | "error"
     git_auth_failure: bool = False,
+    push_delete_failure: bool = False,
+    push_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
     # "timeout-but-actually-merged" | "timeout-and-not-merged"
@@ -176,6 +179,23 @@ def _stub_all_external(
 
         if "git" in cmd and "push" in cmd:
             captured["push_calls"].append(cmd)
+            if "--delete" in cmd and push_delete_failure:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr="remote ref does not exist",
+                )
+            if "--set-upstream" in cmd and push_create_failure:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=128,
+                    stdout="",
+                    stderr=(
+                        "fatal: Authentication failed with "
+                        "Authorization: Basic Z2hwX1NFQ1JFVA== ghp_SECRETLEAK"
+                    ),
+                )
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "git" in cmd and "status" in cmd and "--porcelain" in cmd:
@@ -276,7 +296,10 @@ def test_live_happy_path_pushes_and_opens_pr(monkeypatch: pytest.MonkeyPatch, tm
     assert r.error is None
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
     assert r.merged is True
-    assert len(captured["push_calls"]) == 1
+    assert len(captured["push_calls"]) == 2
+    assert "--delete" in captured["push_calls"][0]
+    assert "--set-upstream" in captured["push_calls"][1]
+    assert "--force-with-lease" not in captured["push_calls"][1]
     assert len(captured["pr_creates"]) == 1
     # working transition + shipped transition
     assert len(captured["label_transitions"]) == 2
@@ -284,6 +307,43 @@ def test_live_happy_path_pushes_and_opens_pr(monkeypatch: pytest.MonkeyPatch, tm
     pr_create = captured["pr_creates"][0]
     title_idx = pr_create.index("--title") + 1
     assert pr_create[title_idx].startswith("[alchemist]")
+
+
+def test_stale_branch_delete_failure_does_not_block_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, push_delete_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert results[0].pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert len(captured["push_calls"]) == 2
+    assert "--delete" in captured["push_calls"][0]
+    assert "--set-upstream" in captured["push_calls"][1]
+    assert len(captured["pr_creates"]) == 1
+
+
+def test_push_create_failure_is_sanitized_before_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_SECRETLEAK0123456789abcdef")
+    captured = _stub_all_external(monkeypatch, push_create_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("push:")
+    assert captured["pr_creates"] == []
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    combined = "\n".join([results[0].error, *bodies])
+    assert "ghp_SECRETLEAK" not in combined
+    assert "Z2hwX1NFQ1JFVA==" not in combined
+    assert "[redacted" in combined
 
 
 def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -762,6 +822,26 @@ def test_live_run_assigns_and_comments_on_claim(
     assert any(
         "--add-assignee" in cmd for cmd in captured["assignee_changes"]
     ), "expected an --add-assignee call"
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("claiming this issue" in b for b in bodies), (
+        f"expected a 'claiming' comment; got {bodies}"
+    )
+
+
+def test_app_auth_skips_assignee_but_still_comments_on_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch)
+    config = replace(
+        _config(tmp_path, dry_run=False),
+        app_id="123",
+        app_installation_id="456",
+        app_private_key="fake-app-private-key",
+    )
+
+    run_tick(config)
+
+    assert captured["assignee_changes"] == []
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
     assert any("claiming this issue" in b for b in bodies), (
         f"expected a 'claiming' comment; got {bodies}"

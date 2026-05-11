@@ -250,7 +250,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Hard timeout on `conductor exec` |
 | `ALCHEMIST_REVIEW_TIMEOUT_SEC` | `900` | Hard timeout on `merge-pr.sh` |
 | `ALCHEMIST_REPO_BLOCKLIST` | `""` | Comma-separated repos to skip even when labelled |
-| `ALCHEMIST_ASSIGNEE` | `@me` | GitHub user to assign to claimed issues |
+| `ALCHEMIST_ASSIGNEE` | `@me` | GitHub user to assign to claimed issues when using PAT auth; App-auth deployments skip assignment and rely on the claim comment |
 | `ALCHEMIST_STATE_DIR` | `/var/alchemist/state` | Persistent state location (Railway volume) |
 
 ## Falsification (when to wind down)

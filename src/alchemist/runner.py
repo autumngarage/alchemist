@@ -285,14 +285,17 @@ def _process_locked(
     # Claim the issue (alchemist#23): assign + post a "starting work" comment
     # so the audit trail is visible, not just the -working label transition.
     # Assignee failure is non-fatal: log + continue. The comment is the backup.
+    # GitHub App installation tokens cannot assign users, so App-auth
+    # deployments skip assignment and rely on the comment for visibility.
     if not config.dry_run:
-        try:
-            _set_assignee(repo, issue.number, "add", config.assignee_user, config)
-        except _GhError as exc:
-            print(
-                f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
-                file=sys.stderr,
-            )
+        if _should_set_assignee(config):
+            try:
+                _set_assignee(repo, issue.number, "add", config.assignee_user, config)
+            except _GhError as exc:
+                print(
+                    f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
+                    file=sys.stderr,
+                )
         _post_activity_comment(
             repo, issue.number,
             f"alchemist: claiming this issue\n"
@@ -1229,17 +1232,23 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # Use 'origin' (set to a plain URL by _clone_or_update) plus the auth
     # header — never embed the token in the URL. See _git_auth_prefix.
     #
-    # `--force-with-lease`: alchemist owns its branch namespace
-    # (`alchemist/issue-N-...`) and a previous tick may have left commits
-    # there from a closed PR or a Railway-killed mid-push. Force-pushing
-    # over our own work is correct; --with-lease refuses if the remote
-    # moved beneath us (which would mean concurrent activity we shouldn't
-    # overwrite — currently impossible since we hold the per-repo lock,
-    # but cheap insurance).
+    # Stale remote branches are expected after retrying a crashed tick or
+    # closed PR. Delete first, then push normally. This avoids
+    # `--force-with-lease` rejecting on fresh clones that never fetched the
+    # remote `alchemist/issue-*` ref (alchemist#59).
     _ = repo  # unused; origin already points at the right remote
     git_auth = _git_auth_prefix(token)
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603,S607
+            [*git_auth, "push", "origin", "--delete", branch],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
     _run_git_auth(
-        [*git_auth, "push", "--set-upstream", "--force-with-lease", "origin", branch],
+        [*git_auth, "push", "--set-upstream", "origin", branch],
         cwd=repo_dir, token=token, timeout=120,
     )
 
@@ -1325,6 +1334,13 @@ def _set_assignee(
         raise _GhError(
             result.stderr.strip() or f"gh issue edit assignee {action} exit {result.returncode}"
         )
+
+
+def _should_set_assignee(config: Config) -> bool:
+    """Return whether this deployment can use GitHub's issue assignee API."""
+    if not config.assignee_user.strip():
+        return False
+    return not config.has_app_credentials
 
 
 def _mark_merge_gate_error(
