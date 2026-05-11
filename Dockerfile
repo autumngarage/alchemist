@@ -16,6 +16,7 @@ FROM python:3.12-slim AS base
 
 ARG TOUCHSTONE_VERSION=v2.11.8
 ARG CONDUCTOR_VERSION=v0.10.18
+ARG UV_VERSION=0.11.13
 # hatch-vcs reads the version from git history; the build context excludes
 # .git so we pin a pretend-version. CI release builds override via --build-arg
 # so the published image matches the tag.
@@ -52,7 +53,7 @@ RUN apt-get update \
 # pipx for isolated Python tool installs (conductor + alchemist itself).
 # uv is needed because many target-repo touchstone preflight validate steps
 # run via `uv run ...`.
-RUN pip install --no-cache-dir pipx==1.7.1 uv==0.5.11
+RUN pip install --no-cache-dir pipx==1.7.1 uv==${UV_VERSION}
 
 # Touchstone: cloned at a pinned tag, exposed at $TOUCHSTONE_ROOT and on PATH.
 # Alchemist invokes $TOUCHSTONE_ROOT/scripts/codex-review.sh from the cloned
