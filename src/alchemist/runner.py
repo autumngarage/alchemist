@@ -58,6 +58,7 @@ _PR_TITLE_PREFIX = "[alchemist]"
 # 30-minute floor while dogfooding.
 _MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 _STUCK_SWEEP_MARGIN_SEC = 10 * 60
+_TARGET_DEP_PREP_TIMEOUT_SEC = 10 * 60
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
@@ -281,6 +282,14 @@ def _process_locked(
         _make_branch(work_dir, branch, default_branch)
     except subprocess.SubprocessError as exc:
         return _bail(repo, issue, started, config, f"branch: {exc}")
+
+    try:
+        _prepare_target_repo(work_dir)
+    except _ToolError as exc:
+        report_tool_failure(
+            config, "target-dependencies", str(exc), repo_context=repo, issue_number=issue.number
+        )
+        return _bail(repo, issue, started, config, f"dependency-prepare: {exc}")
 
     # Claim the issue (alchemist#23): assign + post a "starting work" comment
     # so the audit trail is visible, not just the -working label transition.
@@ -837,6 +846,83 @@ def _conductor_env() -> dict[str, str]:
         if key in {"GITHUB_TOKEN", "GH_TOKEN"} or key.startswith("ALCHEMIST_"):
             env.pop(key, None)
     return env
+
+
+def _prepare_target_repo(repo_dir: Path) -> None:
+    """Install target-repo dependencies before the worker and merge gate run.
+
+    Invariant: dependency preparation must leave the checkout clean. If a
+    setup command changes tracked or untracked files, the run bails before
+    Conductor edits or PR creation so dependency drift does not get shipped as
+    an unrelated model-authored change.
+    """
+    cmd = _target_dependency_prepare_command(repo_dir)
+    if cmd is None:
+        return
+
+    env = {
+        **_conductor_env(),
+        # Touchstone-generated setup.sh files honor this to skip slow/global
+        # verifier tool installation while still syncing project deps.
+        "TOUCHSTONE_SKIP_DEVTOOLS": "1",
+    }
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=_TARGET_DEP_PREP_TIMEOUT_SEC,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise _ToolError(f"{cmd[0]} not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _ToolError(
+            f"{cmd[0]} timeout after {_TARGET_DEP_PREP_TIMEOUT_SEC}s"
+        ) from exc
+
+    if result.returncode != 0:
+        output = f"{result.stdout or ''}{result.stderr or ''}"
+        raise _ToolError(
+            f"{' '.join(cmd)} exit {result.returncode}; "
+            f"tail={_merge_output_tail(_sanitize_error_text(output))}"
+        )
+
+    dirty = _status_entries(repo_dir)
+    if dirty:
+        preview = ", ".join(dirty[:8])
+        suffix = "" if len(dirty) <= 8 else f", +{len(dirty) - 8} more"
+        raise _ToolError(f"{' '.join(cmd)} left checkout dirty: {preview}{suffix}")
+
+
+def _target_dependency_prepare_command(repo_dir: Path) -> list[str] | None:
+    if (repo_dir / "setup.sh").is_file():
+        return ["bash", "setup.sh", "--deps-only"]
+    if (repo_dir / "uv.lock").is_file():
+        return ["uv", "sync", "--locked"]
+    return None
+
+
+def _status_entries(repo_dir: Path) -> list[str]:
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise _ToolError(f"git status failed after dependency prepare: {exc}") from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"git exit {result.returncode}"
+        raise _ToolError(f"git status failed after dependency prepare: {detail}")
+
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _run_conductor(
