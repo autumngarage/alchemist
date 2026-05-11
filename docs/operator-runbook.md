@@ -135,7 +135,7 @@ If conductor declines (issue not actionable as a code change), you'll see `error
 
 **What changes:** dry-run is off. Real PRs open against real repos when conductor produces a diff. But only the **test label** is honored, so only your hand-filed test issues trigger the loop.
 
-**Pass criteria:** at least one test issue completes the full cycle:
+**Pass criteria:** at least one test issue completes the full cycle. Opening a branch and PR alone does not count; a successful Dogfood B run must end in either a merged PR or a review-blocked PR with a clear Touchstone explanation.
 1. label transitions `alchemist-test → alchemist-test-working`
 2. PR opens, titled `[alchemist] fix: <issue title> (#<N>)`, signed `Alchemist <alchemist@autumngarage.dev>`
 3. touchstone's `merge-pr.sh` runs the AI review
