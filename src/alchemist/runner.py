@@ -285,14 +285,17 @@ def _process_locked(
     # Claim the issue (alchemist#23): assign + post a "starting work" comment
     # so the audit trail is visible, not just the -working label transition.
     # Assignee failure is non-fatal: log + continue. The comment is the backup.
+    # GitHub App installation tokens cannot assign users, so App-auth
+    # deployments skip assignment and rely on the comment for visibility.
     if not config.dry_run:
-        try:
-            _set_assignee(repo, issue.number, "add", config.assignee_user, config)
-        except _GhError as exc:
-            print(
-                f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
-                file=sys.stderr,
-            )
+        if _should_set_assignee(config):
+            try:
+                _set_assignee(repo, issue.number, "add", config.assignee_user, config)
+            except _GhError as exc:
+                print(
+                    f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
+                    file=sys.stderr,
+                )
         _post_activity_comment(
             repo, issue.number,
             f"alchemist: claiming this issue\n"
@@ -1229,19 +1232,69 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # Use 'origin' (set to a plain URL by _clone_or_update) plus the auth
     # header — never embed the token in the URL. See _git_auth_prefix.
     #
-    # `--force-with-lease`: alchemist owns its branch namespace
-    # (`alchemist/issue-N-...`) and a previous tick may have left commits
-    # there from a closed PR or a Railway-killed mid-push. Force-pushing
-    # over our own work is correct; --with-lease refuses if the remote
-    # moved beneath us (which would mean concurrent activity we shouldn't
-    # overwrite — currently impossible since we hold the per-repo lock,
-    # but cheap insurance).
+    # Stale remote branches are expected after retrying a crashed tick or
+    # closed PR. Fetch the exact remote branch ref first, then lease against
+    # that SHA. If no remote branch exists, push normally. This avoids the
+    # fresh-clone `--force-with-lease` rejection from alchemist#59 without
+    # deleting the previous recovery branch before the replacement push
+    # succeeds.
     _ = repo  # unused; origin already points at the right remote
     git_auth = _git_auth_prefix(token)
+    _refresh_remote_branch_ref(repo_dir, branch, token)
+    remote_oid = _remote_branch_oid(repo_dir, branch)
+    force_option = (
+        [f"--force-with-lease=refs/heads/{branch}:{remote_oid}"]
+        if remote_oid
+        else []
+    )
     _run_git_auth(
-        [*git_auth, "push", "--set-upstream", "--force-with-lease", "origin", branch],
+        [*git_auth, "push", "--set-upstream", *force_option, "origin", branch],
         cwd=repo_dir, token=token, timeout=120,
     )
+
+
+def _refresh_remote_branch_ref(repo_dir: Path, branch: str, token: str) -> None:
+    """Best-effort refresh of `origin/<branch>` for force-with-lease."""
+    remote_ref = f"refs/remotes/origin/{branch}"
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603,S607
+            ["git", "update-ref", "-d", remote_ref],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    git_auth = _git_auth_prefix(token)
+    refspec = f"+refs/heads/{branch}:{remote_ref}"
+    with contextlib.suppress(FileNotFoundError, subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603,S607
+            [*git_auth, "fetch", "origin", refspec, "--depth", "1"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+
+def _remote_branch_oid(repo_dir: Path, branch: str) -> str | None:
+    remote_ref = f"refs/remotes/origin/{branch}"
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            ["git", "rev-parse", "--verify", remote_ref],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    oid = result.stdout.strip()
+    return oid or None
 
 
 def _make_pr(
@@ -1325,6 +1378,13 @@ def _set_assignee(
         raise _GhError(
             result.stderr.strip() or f"gh issue edit assignee {action} exit {result.returncode}"
         )
+
+
+def _should_set_assignee(config: Config) -> bool:
+    """Return whether this deployment can use GitHub's issue assignee API."""
+    if not config.assignee_user.strip():
+        return False
+    return not config.has_app_credentials
 
 
 def _mark_merge_gate_error(
