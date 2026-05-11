@@ -386,6 +386,30 @@ def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert captured["pr_creates"] == []
 
 
+def test_dependency_prepare_failure_bails_before_conductor_and_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ToolError
+
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_prepare(_repo_dir: Path) -> None:
+        raise _ToolError(".venv/bin/python: No module named pytest")
+
+    monkeypatch.setattr("alchemist.runner._prepare_target_repo", fail_prepare)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.error is not None
+    assert r.error.startswith("dependency-prepare:")
+    assert "No module named pytest" in r.error
+    assert not any("conductor" in cmd and "exec" in cmd for cmd in captured["subprocess_run_args"])
+    assert captured["pr_creates"] == []
+
+
 def test_merge_blocked_leaves_pr_open_for_human_triage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -1052,6 +1076,94 @@ def test_conductor_worker_env_excludes_orchestrator_secrets(
     assert "GH_TOKEN" not in env
     assert "ALCHEMIST_APP_PRIVATE_KEY" not in env
     assert env["OPENROUTER_API_KEY"] == "sk-provider"
+
+
+# --------------------------------------------------------------------------- #
+# Target dependency preparation (alchemist#89)                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_prepare_target_repo_runs_setup_deps_only_without_orchestrator_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _prepare_target_repo
+
+    (tmp_path / "setup.sh").write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_orchestrator")
+    monkeypatch.setenv("GH_TOKEN", "ghp_gh_cli")
+    monkeypatch.setenv("ALCHEMIST_APP_PRIVATE_KEY", "private-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-provider")
+    calls: list[list[str]] = []
+    envs: list[dict[str, str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd == ["bash", "setup.sh", "--deps-only"]:
+            calls.append(cmd)
+            envs.append(kwargs["env"])
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _prepare_target_repo(tmp_path)
+
+    assert calls == [["bash", "setup.sh", "--deps-only"]]
+    env = envs[0]
+    assert env["TOUCHSTONE_SKIP_DEVTOOLS"] == "1"
+    assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
+    assert "ALCHEMIST_APP_PRIVATE_KEY" not in env
+    assert env["OPENROUTER_API_KEY"] == "sk-provider"
+
+
+def test_prepare_target_repo_falls_back_to_locked_uv_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _prepare_target_repo
+
+    (tmp_path / "uv.lock").write_text("")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if cmd == ["uv", "sync", "--locked"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _prepare_target_repo(tmp_path)
+
+    assert ["uv", "sync", "--locked"] in calls
+
+
+def test_prepare_target_repo_rejects_dirty_dependency_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _prepare_target_repo, _ToolError
+
+    (tmp_path / "setup.sh").write_text("#!/usr/bin/env bash\n")
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd == ["bash", "setup.sh", "--deps-only"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=" M uv.lock\n?? .venv/\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(_ToolError, match="left checkout dirty"):
+        _prepare_target_repo(tmp_path)
 
 
 # --------------------------------------------------------------------------- #
