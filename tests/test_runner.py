@@ -386,6 +386,75 @@ def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert captured["pr_creates"] == []
 
 
+def test_issue_body_conductor_timeout_override_reaches_conductor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    issue = _issue()
+    issue = DispatchIssue(
+        number=issue.number,
+        title=issue.title,
+        body=f"{issue.body}\n\nalchemist-timeout: 25m\n",
+        url=issue.url,
+        repository=issue.repository,
+        updated_at=issue.updated_at,
+        labels=issue.labels,
+    )
+    captured = _stub_all_external(monkeypatch, issues=[issue])
+    seen_timeouts: list[int] = []
+
+    def run_conductor(*, timeout: int, **_: object) -> None:
+        seen_timeouts.append(timeout)
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", run_conductor)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert seen_timeouts == [1500]
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    claim_body = next(body for body in bodies if "claiming this issue" in body)
+    assert "conductor timeout: `1500s`" in claim_body
+
+
+def test_invalid_conductor_timeout_override_bails_before_conductor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    issue = _issue()
+    issue = DispatchIssue(
+        number=issue.number,
+        title=issue.title,
+        body=f"{issue.body}\n\nalchemist-conductor-timeout: 12parsecs\n",
+        url=issue.url,
+        repository=issue.repository,
+        updated_at=issue.updated_at,
+        labels=issue.labels,
+    )
+    captured = _stub_all_external(monkeypatch, issues=[issue])
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("conductor-timeout:")
+    assert captured["pr_creates"] == []
+    assert not any("conductor" in cmd and "exec" in cmd for cmd in captured["subprocess_run_args"])
+
+
+def test_conductor_timeout_override_is_bounded():
+    from alchemist.runner import _parse_conductor_timeout_override
+
+    assert _parse_conductor_timeout_override("alchemist-timeout: 60s") == 60
+    assert _parse_conductor_timeout_override("alchemist-timeout: 1h") == 3600
+    assert _parse_conductor_timeout_override("no override") is None
+    with pytest.raises(ValueError, match="between 60s and 3600s"):
+        _parse_conductor_timeout_override("alchemist-timeout: 59s")
+    with pytest.raises(ValueError, match="between 60s and 3600s"):
+        _parse_conductor_timeout_override("alchemist-timeout: 2h")
+
+
 def test_conductor_error_comment_includes_sanitized_transcript_tail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

@@ -207,6 +207,21 @@ The agent loop spent more than `default_budget` (per-issue cap, summed from cond
 
 Set `ALCHEMIST_BUDGET=""` or `"$0"` to disable enforcement entirely (not recommended in production).
 
+### Conductor timeout on substantive issues
+
+The deployment default is intentionally bounded. For a one-off issue that is
+larger than the normal dogfood path, add an explicit body annotation before
+labelling it:
+
+```text
+alchemist-timeout: 25m
+```
+
+`alchemist-conductor-timeout: 1500s` is also accepted. Values may use seconds,
+minutes, or hours (`s`, `m`, `h`) and must resolve to 60-3600 seconds. Invalid
+annotations fail visibly before Conductor runs, so a typo does not silently fall
+back to the default.
+
 ### Touchstone review BLOCKED
 
 Touchstone's AI review found something it couldn't ship — could be a real bug in the agent's diff, or a project-convention violation, or a missing test. The PR stays open; touchstone posts review comments.
@@ -250,7 +265,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_MAX_ISSUES_PER_TICK` | `1` | Global issues mutated per tick, including stuck sweeps |
 | `ALCHEMIST_MAX_PER_REPO_PER_TICK` | `1` | Issues from one repo per tick |
 | `ALCHEMIST_MAX_CONCURRENT_REPOS` | `1` | Repos processed in parallel (cross-repo swarm) |
-| `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Hard timeout on `conductor exec` |
+| `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Default hard timeout on `conductor exec`; issue body can override one run with `alchemist-timeout: 25m` |
 | `ALCHEMIST_REVIEW_TIMEOUT_SEC` | `900` | Hard timeout on `merge-pr.sh` |
 | `ALCHEMIST_REPO_BLOCKLIST` | `""` | Comma-separated repos to skip even when labelled |
 | `ALCHEMIST_ASSIGNEE` | `@me` | GitHub user to assign to claimed issues when using PAT auth; App-auth deployments skip assignment and rely on the claim comment |
