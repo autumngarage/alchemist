@@ -35,6 +35,8 @@ bash scripts/setup-autumngarage-internal.sh --execute
 
 The script is idempotent and dry-runs by default. It creates both the live
 `alchemist-dispatch` state labels and the `alchemist-test` state labels.
+Applying `alchemist-dispatch` is the manual trigger; after that, the Railway
+cron owns the scan → branch → Conductor edit → PR → Touchstone merge-gate flow.
 
 Verify the live queue is idle before enabling the cron:
 
