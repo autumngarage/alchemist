@@ -464,6 +464,9 @@ class _SanitizedSubprocessError(subprocess.SubprocessError):
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _AUTH_HEADER_RE = re.compile(r"Authorization:\s*Basic\s+[A-Za-z0-9+/=]+", re.IGNORECASE)
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
+_TRANSCRIPT_REF_RE = re.compile(r"\bsee\s+`?(?P<path>[^`\s]+\.log)`?")
+_TRANSCRIPT_TAIL_MAX_CHARS = 4000
+_TRANSCRIPT_TAIL_MAX_LINES = 80
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -1072,6 +1075,53 @@ def _extract_agent_summary(transcript_path: Path, max_chars: int = 600) -> str |
     return tail or None
 
 
+def _message_with_transcript_tail(message: str, config: Config) -> str:
+    """Append a bounded transcript tail when an error points at a local log."""
+    tail = _transcript_tail_for_message(message, config)
+    if tail is None:
+        return message
+    return (
+        f"{message}\n\n"
+        "Transcript tail (last "
+        f"{_TRANSCRIPT_TAIL_MAX_LINES} lines, sanitized):\n\n"
+        "```text\n"
+        f"{tail}\n"
+        "```"
+    )
+
+
+def _transcript_tail_for_message(message: str, config: Config) -> str | None:
+    match = _TRANSCRIPT_REF_RE.search(message)
+    if not match:
+        return None
+
+    transcript_path = Path(match.group("path"))
+    allowed_dir = (config.state_dir / "transcripts").resolve(strict=False)
+    resolved_path = transcript_path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(allowed_dir)
+    except ValueError:
+        return None
+
+    if not resolved_path.is_file():
+        return None
+
+    try:
+        text = resolved_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    tail = "\n".join(text.splitlines()[-_TRANSCRIPT_TAIL_MAX_LINES:]).strip()
+    if not tail:
+        return None
+    if len(tail) > _TRANSCRIPT_TAIL_MAX_CHARS:
+        tail = (
+            f"[... truncated to last {_TRANSCRIPT_TAIL_MAX_CHARS} chars]\n"
+            f"{tail[-_TRANSCRIPT_TAIL_MAX_CHARS:]}"
+        )
+    return _sanitize_error_text(tail, token=config.github_token)
+
+
 def _parse_budget(raw: str) -> float | None:
     """Parse a budget string like "$2", "$1.50", or "0.25" → float USD.
 
@@ -1433,6 +1483,7 @@ def _post_error_comment(
     repo: str, issue_number: int, message: str, config: Config,
 ) -> None:
     """Backwards-compat shim around _post_activity_comment for the bail path."""
+    message = _message_with_transcript_tail(message, config)
     _post_activity_comment(repo, issue_number, f"alchemist: {message}", config)
 
 

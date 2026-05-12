@@ -386,6 +386,52 @@ def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert captured["pr_creates"] == []
 
 
+def test_conductor_error_comment_includes_sanitized_transcript_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ToolError
+
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_conductor(*, transcript_path: Path, **_: object) -> None:
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text(
+            "\n".join(f"noisy line {i}" for i in range(90))
+            + "\nfinal diagnostic with token ghp_fake\n",
+            encoding="utf-8",
+        )
+        raise _ToolError(f"exit 2; see {transcript_path}")
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", fail_conductor)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error == (
+        f"conductor: exit 2; see "
+        f"{tmp_path / 'transcripts' / 'autumngarage-touchstone-7.log'}"
+    )
+    assert captured["pr_creates"] == []
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "exit 2; see" in body)
+    assert "Transcript tail" in error_body
+    assert "final diagnostic with token [redacted-token]" in error_body
+    assert "ghp_fake" not in error_body
+    assert "noisy line 0" not in error_body
+
+
+def test_transcript_tail_ignores_paths_outside_state_dir(tmp_path: Path):
+    from alchemist.runner import _message_with_transcript_tail
+
+    outside = tmp_path / "outside.log"
+    outside.write_text("do not publish this", encoding="utf-8")
+    config = _config(tmp_path)
+    message = f"conductor: exit 2; see {outside}"
+
+    assert _message_with_transcript_tail(message, config) == message
+
+
 def test_dependency_prepare_failure_bails_before_conductor_and_pr(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
