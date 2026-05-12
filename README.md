@@ -18,14 +18,15 @@ title prefix so the audit trail in `git log` and PR lists is unambiguous.
 
 ## Status
 
-**v0.0.x — early bootstrap.** The CLI exists with `scan` and `doctor` only. The full
-`run-once` loop ships in v0.1.
+`run-once` is live in this repo alongside `banner`, `doctor`, and `scan`.
+For deployment/dogfood guidance, use the operator runbook:
+[`docs/operator-runbook.md`](docs/operator-runbook.md).
 
 ## How it composes
 
 | Tool | Role |
 |---|---|
-| **Touchstone** | review gate (invoked headless via `scripts/codex-review.sh`) |
+| **Touchstone** | review gate (invoked headless via `scripts/merge-pr.sh`) |
 | **Cortex** | optional journal author for each transmute cycle (target repo's `.cortex/journal/`) |
 | **Conductor** | LLM router for the agentic fix loop (`conductor exec --tools ...`) |
 | **Alchemist** | the orchestrator — GitHub I/O, branch state, lockfile, label transitions |
