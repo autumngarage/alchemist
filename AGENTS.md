@@ -8,7 +8,16 @@ When coding, follow the authoring guide. When explicitly reviewing a PR or runni
 
 ### Who You Are on This Project
 
-{{PROJECT_DESCRIPTION — describe the project's purpose, your role, and what "good" looks like for this codebase. Be specific about the domain.}}
+Alchemist is the Autumn Garage issue transmuter. It scans GitHub issues labelled
+for dispatch, claims one bounded unit of work, renders a brief, delegates the
+code change to Conductor, opens a PR, and hands that PR to Touchstone's
+`merge-pr.sh` review-and-merge gate.
+
+Good work in this repo is conservative automation: preserve the audit trail,
+avoid leaking credentials, keep label/lock/branch state recoverable, and let
+Conductor and Touchstone own the decisions they are designed to own. Alchemist
+should stay a narrow orchestrator around GitHub, git, Railway cron, and the
+tool handoff contracts.
 
 <!-- touchstone:steering:start -->
 
@@ -119,27 +128,103 @@ Fix failing tests before pushing.
 
 ### Release & Distribution
 
-{{RELEASE_AND_DISTRIBUTION — how is this project shipped? Include the release command, package registry or deployment target, required version bump, post-release verification, and rollback path. Examples: Homebrew tap, npm package, Docker image, Vercel/Railway deploy, app store build.}}
+Alchemist ships two ways:
+
+- **CLI release:** create a GitHub Release from `main` with
+  `gh release create vX.Y.Z --generate-notes`. The `release.yml` workflow bumps
+  `autumngarage/homebrew-alchemist` through the shared Autumn Garage Homebrew
+  workflow. Verify with `brew update && brew upgrade alchemist` or by checking
+  the tap commit and formula SHA.
+- **Internal runtime:** deploy the Railway cron image from this repo with
+  `railway up --service alchemist-cron --detach`. Verify with
+  `railway logs --service alchemist-cron --deployment` and
+  `railway run --service alchemist-cron -- alchemist doctor --json`.
+
+Rollback for the CLI is a new release or tap formula revert. Rollback for
+Railway is redeploying a previous working commit/image and restoring the prior
+Railway variables. Runtime changes that affect Conductor, Touchstone, or Cortex
+pins must be verified in the built image, not only in the local checkout.
 
 After merging release-affecting changes, verify the shipped artifact or deployed environment matches the pushed code.
 
 ### Architecture
 
-{{ARCHITECTURE — describe key packages, their responsibilities, and how data flows between them. Keep it high-level.}}
+Alchemist is a Python CLI with a cron-friendly `run-once` path:
+
+1. `scanner.py` finds dispatch-labelled issues in one GitHub org.
+2. `runner.py` enforces per-repo serialization, transitions labels, clones or
+   updates the target repo, creates the branch, writes the brief/transcript,
+   calls `conductor exec`, commits and pushes changes, opens the PR, then invokes
+   Touchstone's `merge-pr.sh`.
+3. `briefs.py` loads package templates and renders the Conductor brief plus PR
+   body. Issue content is untrusted input and must remain fenced as such.
+4. `auth_token.py` mints GitHub App installation tokens for unattended Railway
+   ticks; PAT auth remains a local/debug fallback.
+5. `config.py` resolves TOML/env config and supplies the bounded runtime knobs.
+6. `locks.py` stores recoverable lock state under the configured state dir.
+
+Alchemist never imports Conductor, Touchstone, or Cortex as libraries. The
+contract is subprocess + files + exit codes. Mode-specific behavior belongs at
+the I/O boundary (`dry_run`, provider selection, Railway entrypoint), not in
+parallel business logic.
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
-| {{key files and their purposes}} | |
+| `src/alchemist/runner.py` | Main transmute loop, label lifecycle, git/PR operations, Conductor and Touchstone handoffs. |
+| `src/alchemist/auth_token.py` | GitHub App token minting and PAT fallback. Treat as security-sensitive. |
+| `src/alchemist/config.py` | TOML/env runtime config and safety caps. |
+| `src/alchemist/briefs.py` | Runtime template loading and prompt/PR body rendering. |
+| `src/alchemist/scanner.py` | GitHub issue discovery for dispatch labels. |
+| `src/alchemist/locks.py` | Per-repo/issue lock acquisition and stale lock behavior. |
+| `src/alchemist/reporter.py` | Structured reporting of tool failures. |
+| `Dockerfile` | Railway runtime image, pinned Conductor/Touchstone versions, bundled CLIs. |
+| `scripts/railway-entrypoint.sh` | Cron entrypoint and runtime token export. |
+| `scripts/open-pr.sh`, `scripts/merge-pr.sh`, `scripts/codex-review.sh` | Local PR/review/merge workflow copied from Touchstone. |
+| `docs/operator-runbook.md` | Deployment, dogfood gates, and operational failure modes. |
+| `docs/internal-autumngarage.md` | Autumn Garage production profile, watched repos, Railway variables. |
 
 ### State & Config
 
-{{STATE_AND_CONFIG — where does mutable state live? What's gitignored? Where's the config template?}}
+Config is loaded from `$ALCHEMIST_CONFIG`, `~/.alchemist/config.toml`, or
+`/etc/alchemist/config.toml` in the Railway image, with `ALCHEMIST_*` env vars
+overriding file values. Internal Railway defaults live in
+`docs/internal-autumngarage.md`; the public template lives in `README.md` and
+`docs/operator-runbook.md`.
+
+Mutable runtime state lives under `ALCHEMIST_STATE_DIR` (Railway:
+`/var/alchemist/state`) and includes cloned worktrees, lock files, rendered
+briefs, Conductor transcripts, and NDJSON usage logs. That directory must be on
+a Railway volume for efficient retries, but error comments must not depend on
+operators having post-cron shell access to it.
+
+Gitignored/generated artifacts include build outputs (`dist/`, `build/`),
+virtualenv/cache directories, generated `_version.py`, and Cortex indexes under
+`.cortex/.index*` / `.cortex/pending/`.
 
 ### Hard-Won Lessons
 
-{{HARD_WON_LESSONS — bugs that cost real time or money. Each should teach a generalizable lesson. Format: what happened, what was the root cause, what's the fix/guard now in place.}}
+- Git credentials leaked through URL-based auth in git stdout/stderr and stored
+  remotes. Root cause: embedding tokens in clone/push URLs. Guard: use
+  `http.extraheader` auth and sanitize every subprocess error before logging or
+  commenting.
+- Railway marked handled issue failures as crashed deployments. Root cause:
+  issue-level tool errors returned process exit 1 even after Alchemist had
+  labelled/commented/reported the issue. Guard: distinguish run-level failures
+  from per-issue handled failures in the CLI exit contract.
+- Error comments pointed only at `/var/alchemist/state/transcripts/*.log`, which
+  is not reachable after a one-shot cron exits. Root cause: diagnostics lived
+  only on the Railway volume. Guard: include a bounded, sanitized transcript
+  tail in issue error comments for logs under the transcript directory.
+- Conductor fixes do not reach the Railway runtime until the Dockerfile pin is
+  bumped and the service is redeployed. Root cause: assuming a source merge in a
+  sibling repo updates the pinned image. Guard: verify runtime pins and deployed
+  image when a fix depends on a sibling tool release.
+- Wheel builds duplicated template package entries when templates were both
+  package data and force-included. Root cause: redundant Hatch wheel config.
+  Guard: check `unzip -Z1 dist/*.whl | sort | uniq -d` when packaging data paths
+  change.
 
 ---
 
@@ -149,14 +234,24 @@ You are reviewing pull requests for **alchemist**. Optimize your review for catc
 
 ### What to prioritize (in order)
 
-{{PRIORITIES — list your project's review priorities in order of importance. Examples:
-
-1. **Data integrity.** Anything that changes how data is written, migrated, or deleted.
-2. **Security.** Auth, input validation, secrets handling, injection risks.
-3. **Silent failures.** New `except: pass`, swallowed exceptions, fallbacks that mask broken state.
-4. **Tests for new failure modes.** Bug fixes must add a test that reproduces the original failure.
-
-Be specific to your project's actual risks. Generic priorities are useless.}}
+1. **Credential safety.** GitHub tokens, App private keys, OpenRouter keys, git
+   auth headers, subprocess output, Railway logs, and issue comments must not
+   expose secrets.
+2. **GitHub state integrity.** Label transitions, assignee/comment side effects,
+   issue closure, PR creation, branch naming, force-with-lease behavior, and
+   retry semantics must be idempotent and auditable.
+3. **Recoverable orchestration.** Locks, stale sweeps, per-issue failure paths,
+   cron exit codes, and Railway volume paths must leave operators a safe retry
+   path and enough context to debug.
+4. **Tool handoff contracts.** Conductor, Touchstone, Cortex, `gh`, and `git`
+   subprocess calls must have explicit timeouts, captured diagnostics, stable
+   working directories, and narrow ownership boundaries.
+5. **Runtime/deployment drift.** Dockerfile pins, Railway entrypoint behavior,
+   Homebrew release workflow, package data, and generated versions must match
+   the code path being tested.
+6. **Tests for changed failure modes.** Bug fixes need focused regression tests;
+   broad orchestration changes need CLI/runner tests that cover dry-run and live
+   mutation boundaries.
 
 Style nits, formatting, and theoretical refactors are **out of scope** unless they hide a bug. Do not flag them.
 
@@ -166,14 +261,41 @@ Style nits, formatting, and theoretical refactors are **out of scope** unless th
 
 #### High-scrutiny paths
 
-{{HIGH_SCRUTINY_PATHS — list the files/directories where mistakes are most expensive. Examples:
+Files and directories:
 
-Files: `src/auth/`, `src/payments/`, `migrations/`
+- `src/alchemist/runner.py`
+- `src/alchemist/auth_token.py`
+- `src/alchemist/config.py`
+- `src/alchemist/scanner.py`
+- `src/alchemist/locks.py`
+- `src/alchemist/briefs.py`
+- `Dockerfile`
+- `scripts/railway-entrypoint.sh`
+- `scripts/open-pr.sh`, `scripts/merge-pr.sh`, `scripts/codex-review.sh`
+- `.github/workflows/release.yml`
+- `pyproject.toml`
+- `src/alchemist/templates/`
+- `docs/operator-runbook.md`
+- `docs/internal-autumngarage.md`
 
 Flag any of the following:
-- (specific anti-patterns relevant to your project)
-- (things that have gone wrong before)
-- (invariants that must hold)}}
+
+- Token-bearing URLs, auth headers, env dumps, subprocess stderr/stdout, or
+  transcript tails that can reach logs or GitHub comments without sanitization.
+- New label transitions that can strand an issue in `-working`, skip
+  `-error`/`-declined` visibility, or retry a shipped issue without an explicit
+  operator action.
+- Git pushes without force-with-lease when updating an existing Alchemist branch,
+  or force pushes that do not first resolve the remote branch OID.
+- New conductor/touchstone/cortex calls that bypass the existing subprocess
+  wrappers, omit timeouts, change cwd incorrectly, or swallow non-zero exits.
+- Cron entrypoint changes that make handled per-issue errors fail the Railway
+  deployment, or make run-level auth/config failures look successful.
+- Config/schema/env changes without README/runbook/internal profile updates.
+- Template/package-data changes without built-wheel or template-loading
+  verification.
+- Changes to state-dir layout without migration or compatibility for existing
+  Railway volumes.
 
 #### Silent failures
 
