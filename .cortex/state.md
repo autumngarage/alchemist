@@ -1,10 +1,10 @@
 ---
-Generated: 2026-05-12T15:37:02-04:00
+Generated: 2026-05-12T15:40:02-04:00
 Generator: cortex refresh-state v1.6.2
 Sources:
-  - HEAD sha: f6a4ce6a90da0d9963f00a279bde4298be12cdf3
+  - HEAD sha: ca601c0cd1e095eba1b8ca01ce598955ff17ad6b
   - .cortex/plans/*.md (0 files)
-  - .cortex/journal/*.md (4 entries, 2026-05-11..2026-05-12)
+  - .cortex/journal/*.md (5 entries, 2026-05-11..2026-05-12)
   - .cortex/doctrine/*.md (0 entries)
   - .cortex/templates/**/*.md (12 templates)
   - docs/case-studies/*.md (0 case studies)
@@ -15,6 +15,7 @@ Sources-hash:
   .cortex/journal/2026-05-12-alchemist-100.md: 1a5b927daa0cc12c5196c9b086e3484933281d3fb727ab89c24069f6876f17e8
   .cortex/journal/2026-05-12-alchemist-77.md: 3438dc6fd3a8ecee68b05a2cb1c22a1e04914abf9ec9e680eabd71f654573367
   .cortex/journal/2026-05-12-alchemist-98.md: 68c0767db1f7148a453ee3a7c33ea257fe1b32116ccf0f7ddc701e3b90512e19
+  .cortex/journal/2026-05-12-pr-merged-1540.md: b5daeb0e6073b412abc21bc7dc4f242114f8ffa5e13d58e76fd4b7e13a689b06
   .cortex/templates/README.md: 0e1fe4be29e8c465aeaac0b75b1a6522f1f98333ea2f009d4d900bd56abd866f
   .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
   .cortex/templates/digest/quarterly.md: 8750f1eb703b158d30869204737b071213d2b33370af86ce85daed1f48943f98
@@ -27,7 +28,7 @@ Sources-hash:
   .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
   .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
   .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
-Corpus: 4 Journal entries, 0 Plans, 0 Doctrine entries, 12 Templates, 0 Case studies
+Corpus: 5 Journal entries, 0 Plans, 0 Doctrine entries, 12 Templates, 0 Case studies
 Omitted:
   []
 Incomplete:
@@ -44,7 +45,7 @@ Spec: 1.1.0
 
 ## Shipped recently
 
-- none
+- **2026-05-12** — PR #108 merged — chore complete cortex install (`.cortex/journal/2026-05-12-pr-merged-1540.md`, Type: pr-merged)
 
 ## Stale-now / handle-later
 
