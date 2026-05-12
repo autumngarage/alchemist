@@ -1,0 +1,23 @@
+# Cortex scan patterns — taught by `cortex init`.
+# Each `[[pattern]]` entry teaches the scanner one new file shape.
+# Edit by hand or let init append more during interactive runs.
+
+[[pattern]]
+glob = "GEMINI.md"
+category = "map_ref"
+description = "(taught by user during cortex init on 2026-05-12)"
+
+[[pattern]]
+glob = "TOUCHSTONE.md"
+category = "map_ref"
+description = "(taught by user during cortex init on 2026-05-12)"
+
+[[pattern]]
+glob = "docs/internal-autumngarage.md"
+category = "map_ref"
+description = "(taught by user during cortex init on 2026-05-12)"
+
+[[pattern]]
+glob = "docs/operator-runbook.md"
+category = "map_ref"
+description = "(taught by user during cortex init on 2026-05-12)"
