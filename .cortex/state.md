@@ -1,58 +1,51 @@
-# Project State — Alchemist
+---
+Generated: 2026-05-12T15:37:02-04:00
+Generator: cortex refresh-state v1.6.2
+Sources:
+  - HEAD sha: f6a4ce6a90da0d9963f00a279bde4298be12cdf3
+  - .cortex/plans/*.md (0 files)
+  - .cortex/journal/*.md (4 entries, 2026-05-11..2026-05-12)
+  - .cortex/doctrine/*.md (0 entries)
+  - .cortex/templates/**/*.md (12 templates)
+  - docs/case-studies/*.md (0 case studies)
+  - SPEC version: 1.1.0
+  - pyproject.toml: alchemist + cortex package version: 1.6.2
+Sources-hash:
+  .cortex/journal/2026-05-11-alchemist-87.md: 48133f6d3448ebd30d61a9afd4b31a42f2f8f34d888c7ea10918282ee973e4d0
+  .cortex/journal/2026-05-12-alchemist-100.md: 1a5b927daa0cc12c5196c9b086e3484933281d3fb727ab89c24069f6876f17e8
+  .cortex/journal/2026-05-12-alchemist-77.md: 3438dc6fd3a8ecee68b05a2cb1c22a1e04914abf9ec9e680eabd71f654573367
+  .cortex/journal/2026-05-12-alchemist-98.md: 68c0767db1f7148a453ee3a7c33ea257fe1b32116ccf0f7ddc701e3b90512e19
+  .cortex/templates/README.md: 0e1fe4be29e8c465aeaac0b75b1a6522f1f98333ea2f009d4d900bd56abd866f
+  .cortex/templates/digest/monthly.md: 0c13cf6781d15e0858544e3919166a7c123698066e6c93fc70a3b808a8239813
+  .cortex/templates/digest/quarterly.md: 8750f1eb703b158d30869204737b071213d2b33370af86ce85daed1f48943f98
+  .cortex/templates/doctrine/candidate.md: f36d07799d0573161985d3b0f0592970b13dc3e8f6f69eb19f0c49ee45cdc618
+  .cortex/templates/journal/decision.md: c13a09aba83b4ea70d16406c2b22941a200a8e76a3e3af9abbb15484b56b8783
+  .cortex/templates/journal/incident.md: 4dd23cdeb23ee8584908218ca585d4e3cc4d9f3de64cd55c43720ab731fc441a
+  .cortex/templates/journal/plan-transition.md: 883e4aa674e446869c9885fc43c8349e43d696c03b5c97aad4db04e1e46c678e
+  .cortex/templates/journal/pr-merged.md: 54c7db7d1a7a9e5833436825c542d746d9dc96270388e76910cef2bd91b20e64
+  .cortex/templates/journal/promotion.md: 04061afa98ae6f0ef64ba960bc92df23aa6a7371f594c5c5906ff213842cf800
+  .cortex/templates/journal/release.md: 9a6bc59219156e48b419fb170c7c50ff557767def8672ef20568df3e14eadbd0
+  .cortex/templates/journal/sentinel-cycle.md: 2945e2d94af4ec9848584b4b3e9cea7060d2968dd42e78faf21fb6f859137476
+  .cortex/templates/plans/template.md: d8156cfa3b86acd2a1fbb36cff07cae37d99f3adee7f72b14b7b16e645c51b44
+Corpus: 4 Journal entries, 0 Plans, 0 Doctrine entries, 12 Templates, 0 Case studies
+Omitted:
+  []
+Incomplete:
+  - docs/case-studies — missing source directory
+Conflicts-preserved: []
+Spec: 1.1.0
+---
 
-> The fifth tool in the Autumn Garage family — the issue-driven transmuter.
-> v0.0.1 ships **scan + doctor + banner only** so we can verify the cron + auth
-> path on Railway before any code that mutates GitHub state goes live. v0.1
-> ships the full `run-once` transmute loop.
+# Project State
 
-## P0 — v0.0.1 bootstrap
+## Active plans
 
-CLI surface: `alchemist scan`, `alchemist doctor`, `alchemist banner`.
-`alchemist run-once` is a placeholder that exits non-zero with a "ships in v0.1"
-message. This is intentional — the deploy process needs a target before we
-add load-bearing code that touches real repos.
+- none
 
-## P1 — v0.1 transmute loop
+## Shipped recently
 
-`alchemist run-once`:
-1. Scan org for labelled issues
-2. For each issue (capped at `max_per_tick`):
-   - Acquire lockfile on `<state_dir>/locks/<repo>-<issue>.lock`
-   - Transition label `dispatch → working`
-   - Clone or update the target repo, create branch `alchemist/issue-<N>-<slug>`
-   - Render brief from versioned `templates/brief.md.j2`
-   - `conductor exec --with <provider> --brief-file <path>` with `--timeout 600`
-   - Invoke `<touchstone>/scripts/codex-review.sh` from the cloned repo's root
-   - Push branch, `gh pr create` with body = issue link + review summary + cost log
-   - Transition label `working → shipped`
-   - Release lock
-3. Errors flip label to `error` + structured comment, release lock, no retries
+- none
 
-Dry-run mode skips the mutating steps and logs what would happen.
+## Stale-now / handle-later
 
-## P2 — Dockerfile + Railway
-
-Dockerfile bundles gh, git, conductor (pipx-installed), touchstone (cloned at
-pinned tag to /opt/touchstone), alchemist itself. ENTRYPOINT runs once and exits
-so it's cron-friendly.
-
-Railway: new project, one service, cron `*/5 * * * *`, persistent volume at
-`/var/alchemist/state`, env vars for GITHUB_TOKEN, OPENROUTER_API_KEY,
-ALCHEMIST_*.
-
-## Dogfood gates (live cutover sequence)
-
-Three manual transitions, never auto-graduated:
-
-1. **A** — `dry_run=true`, label `alchemist-test`. Henry files a tiny test issue.
-2. **B** — `dry_run=false`, label still `alchemist-test`. Real PR against a real
-   trivial fix. Inspect, merge or reject.
-3. **Live** — flip label to `alchemist-dispatch`. `max_per_tick=1` for one week,
-   then lift the cap.
-
-## Open questions
-
-- After Dogfood B is clean, does Cortex T1.6 journal-write integration ship in
-  v0.1 or wait for v0.2? (Plan says v0.2 — keep core thin first.)
-- When the user volume on `alchemist-dispatch` justifies it, switch to GitHub
-  App auth with installation tokens. v0.1 stays on fine-grained PAT.
+- none

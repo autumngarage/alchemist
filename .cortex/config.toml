@@ -1,0 +1,18 @@
+# .cortex/config.toml — Cortex per-project configuration.
+#
+# This file is optional. The full schema is documented at:
+#   https://github.com/autumngarage/cortex/blob/main/docs/config-reference.md
+#
+# Common section: [audit-instructions]
+# Use this to drive `cortex doctor --audit-instructions` against external
+# claims (install commands, version references, sibling-repo paths) in
+# files like CLAUDE.md / README.md.
+#
+# Example shapes are documented in docs/config-reference.md. Uncomment
+# and tailor the fields below to this project's distribution surface.
+
+# [audit-instructions]
+# scan_files = ["CLAUDE.md", "AGENTS.md", "README.md"]
+# siblings = []
+# github_repos = []
+# # homebrew_tap = "<org>/<tap-formula>"
