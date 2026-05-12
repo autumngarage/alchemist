@@ -37,6 +37,8 @@ The script is idempotent and dry-runs by default. It creates both the live
 `alchemist-dispatch` state labels and the `alchemist-test` state labels.
 Applying `alchemist-dispatch` is the manual trigger; after that, the Railway
 cron owns the scan → branch → Conductor edit → PR → Touchstone merge-gate flow.
+Alchemist self-reports should use that same issue path; only narrow, safe
+self-fixes should receive the dispatch label automatically.
 
 Verify the live queue is idle before enabling the cron:
 
