@@ -15,7 +15,7 @@
 FROM python:3.12-slim AS base
 
 ARG TOUCHSTONE_VERSION=v2.11.8
-ARG CONDUCTOR_VERSION=v0.10.18
+ARG CONDUCTOR_VERSION=v0.10.20
 ARG UV_VERSION=0.11.13
 # hatch-vcs reads the version from git history; the build context excludes
 # .git so we pin a pretend-version. CI release builds override via --build-arg
