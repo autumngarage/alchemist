@@ -44,17 +44,17 @@ in one step.
 If any external CLI is missing, alchemist fails fast with a structured error.
 No fallbacks, no shims, no silent degradation.
 
-## v0.0.x scope (what's here today)
+## Current runtime surface
 
 - `alchemist scan` — list labelled issues across the configured org. No side effects.
-- `alchemist doctor` — verify CLIs, auth, writable state. Exits non-zero if unhealthy.
-- `alchemist banner` — print the brand surface (Doctrine 0007).
-- `alchemist run-once` — placeholder. Ships in v0.1.
-
-## v0.1 scope (next)
-
+- `alchemist doctor` — verify CLIs, auth, writable state, and runtime config.
+  Exits non-zero when the tick should not run.
+- `alchemist banner` — print the brand surface.
+- `alchemist auth-token` — mint a GitHub App installation token for the cron
+  entrypoint, or echo the PAT fallback when App vars are absent.
 - `alchemist run-once` — full transmute flow with subprocess timeouts, lockfile
-  state, brief rendering from versioned template, label transitions, error paths.
+  state, brief rendering from versioned templates, label transitions, error
+  comments, PR creation, and Touchstone merge-gate delegation.
 - Dockerfile bundling gh, git, conductor, touchstone, alchemist.
 - Railway cron service + persistent volume + env vars.
 - Three dogfood gates: dry-run + test label → live + test label → live + real label.
