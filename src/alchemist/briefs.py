@@ -1,7 +1,7 @@
 """Brief renderer — turns a DispatchIssue into the prompt handed to conductor.
 
 The brief lives in `src/alchemist/templates/brief.md.j2` and ships with the
-wheel via `[tool.hatch.build.targets.wheel.force-include]`. Every render
+wheel as package data under `alchemist.templates`. Every render
 embeds the issue body inside `<untrusted-input>` delimiters with an explicit
 preamble warning the LLM not to follow injected instructions — the issue
 body is user-controlled input and must not be treated as a directive.
