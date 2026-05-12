@@ -203,11 +203,10 @@ def run_once(as_json: bool) -> None:
             line += f"  ({r.elapsed_sec:.1f}s)"
             click.echo(line)
 
-    benign_prefixes = ("lock-busy", "conductor produced no diff", "stuck-sweep")
-    fatal = [
-        r for r in results
-        if r.error and not any(r.error.startswith(p) for p in benign_prefixes)
-    ]
+    # Exit non-zero only for run-level failures that prevented the tick from
+    # operating (doctor/auth/config/scan). Per-issue failures are handled by
+    # transitioning labels/comments/reporting and should not crash cron.
+    fatal = [r for r in results if r.error and r.issue_number == 0]
     sys.exit(1 if fatal else 0)
 
 

@@ -213,7 +213,32 @@ def test_run_once_exits_zero_when_all_errors_are_benign(
     assert result.exit_code == 0
 
 
-def test_run_once_exits_one_when_real_tool_error(
+def test_run_once_exits_zero_when_issue_level_tool_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    from alchemist.runner import RunResult
+
+    monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
+    handled = [
+        RunResult(
+            repo="autumngarage/touchstone",
+            issue_number=1,
+            pr_url=None,
+            merged=None,
+            error="conductor: timeout after 600s",
+            elapsed_sec=600.0,
+            dry_run=False,
+        )
+    ]
+    monkeypatch.setattr("alchemist.runner.run_tick", lambda config: handled)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["run-once", "--json"])
+    assert result.exit_code == 0
+
+
+def test_run_once_exits_one_when_run_level_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     from alchemist.runner import RunResult
@@ -222,12 +247,12 @@ def test_run_once_exits_one_when_real_tool_error(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
     fatal = [
         RunResult(
-            repo="autumngarage/touchstone",
-            issue_number=1,
+            repo="autumngarage",
+            issue_number=0,
             pr_url=None,
             merged=None,
-            error="conductor: timeout after 600s",
-            elapsed_sec=600.0,
+            error="doctor: github auth: missing",
+            elapsed_sec=0.0,
             dry_run=False,
         )
     ]
