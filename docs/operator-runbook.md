@@ -4,6 +4,9 @@ How to deploy, dogfood, and run alchemist for one GitHub org.
 
 This document is the canonical reference for an operator setting up alchemist for the first time, walking through the dogfood gates, going live, and handling the common failure modes. If you're a new operator: read top-to-bottom once, then keep this open while you work the dogfood ramp.
 
+For the Autumn Garage internal deployment profile, including the watched repo
+scope and deployment blocklist, see [`docs/internal-autumngarage.md`](internal-autumngarage.md).
+
 ## Architecture (in one paragraph)
 
 Alchemist is a Railway cron service. Every 5 minutes it queries one GitHub org for issues labelled `alchemist-dispatch`, dispatches each found issue to [Conductor](https://github.com/autumngarage/conductor)'s agentic loop on a fresh feature branch, opens a PR, then hands the PR to [Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` — which runs the AI code-review gate and squash-merges on a CLEAN verdict. BLOCKED reviews leave the PR open with comments for human triage. Alchemist signs all commits as `Alchemist <alchemist@autumngarage.dev>` and prefixes PR titles with `[alchemist]` for audit visibility.
