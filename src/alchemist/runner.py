@@ -267,6 +267,11 @@ def _process_locked(
             return _result(repo, issue.number, started, config, error=f"label-transition: {exc}")
 
     try:
+        conductor_timeout_sec = _conductor_timeout_for_issue(issue, config)
+    except ValueError as exc:
+        return _bail(repo, issue, started, config, f"conductor-timeout: {exc}")
+
+    try:
         default_branch = _default_branch(repo)
     except _GhError as exc:
         return _bail(repo, issue, started, config, f"default-branch: {exc}")
@@ -306,10 +311,9 @@ def _process_locked(
                     file=sys.stderr,
                 )
         _post_activity_comment(
-            repo, issue.number,
-            f"alchemist: claiming this issue\n"
-            f"- branch: `{branch}`\n"
-            f"- provider: `{config.default_provider}`",
+            repo,
+            issue.number,
+            _claim_comment_body(branch, config.default_provider, conductor_timeout_sec, config),
             config,
         )
 
@@ -328,7 +332,7 @@ def _process_locked(
             brief_path=brief_path,
             cwd=work_dir,
             provider=config.default_provider,
-            timeout=config.conductor_timeout_sec,
+            timeout=conductor_timeout_sec,
             transcript_path=transcript_path,
             ndjson_path=ndjson_path,
         )
@@ -467,11 +471,82 @@ _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0
 _TRANSCRIPT_REF_RE = re.compile(r"\bsee\s+`?(?P<path>[^`\s]+\.log)`?")
 _TRANSCRIPT_TAIL_MAX_CHARS = 4000
 _TRANSCRIPT_TAIL_MAX_LINES = 80
+_CONDUCTOR_TIMEOUT_OVERRIDE_RE = re.compile(
+    r"(?im)^\s*alchemist-(?:conductor-)?timeout\s*:\s*(?P<value>\S.*?)\s*$"
+)
+_CONDUCTOR_TIMEOUT_MIN_SEC = 60
+_CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
 
 
 def _branch_name(issue: DispatchIssue) -> str:
     slug = _SLUG_RE.sub("-", issue.title.lower()).strip("-")[:40]
     return f"alchemist/issue-{issue.number}-{slug}" if slug else f"alchemist/issue-{issue.number}"
+
+
+def _conductor_timeout_for_issue(issue: DispatchIssue, config: Config) -> int:
+    override = _parse_conductor_timeout_override(issue.body)
+    return config.conductor_timeout_sec if override is None else override
+
+
+def _parse_conductor_timeout_override(body: str) -> int | None:
+    match = _CONDUCTOR_TIMEOUT_OVERRIDE_RE.search(body)
+    if not match:
+        return None
+    seconds = _parse_duration_seconds(match.group("value"))
+    if not (_CONDUCTOR_TIMEOUT_MIN_SEC <= seconds <= _CONDUCTOR_TIMEOUT_MAX_SEC):
+        raise ValueError(
+            "timeout must be between "
+            f"{_CONDUCTOR_TIMEOUT_MIN_SEC}s and {_CONDUCTOR_TIMEOUT_MAX_SEC}s"
+        )
+    return seconds
+
+
+def _parse_duration_seconds(raw: str) -> int:
+    cleaned = raw.strip().lower()
+    match = re.fullmatch(r"(?P<amount>\d+)\s*(?P<unit>[a-z]+)?", cleaned)
+    if not match:
+        raise ValueError(
+            "expected duration like '1500s', '25m', or '1h'"
+        )
+
+    amount = int(match.group("amount"))
+    unit = match.group("unit") or "s"
+    multipliers = {
+        "s": 1,
+        "sec": 1,
+        "secs": 1,
+        "second": 1,
+        "seconds": 1,
+        "m": 60,
+        "min": 60,
+        "mins": 60,
+        "minute": 60,
+        "minutes": 60,
+        "h": 60 * 60,
+        "hr": 60 * 60,
+        "hrs": 60 * 60,
+        "hour": 60 * 60,
+        "hours": 60 * 60,
+    }
+    multiplier = multipliers.get(unit)
+    if multiplier is None:
+        raise ValueError(
+            "expected duration unit s, m, or h"
+        )
+    return amount * multiplier
+
+
+def _claim_comment_body(
+    branch: str, provider: str, conductor_timeout_sec: int, config: Config
+) -> str:
+    lines = [
+        "alchemist: claiming this issue",
+        f"- branch: `{branch}`",
+        f"- provider: `{provider}`",
+    ]
+    if conductor_timeout_sec != config.conductor_timeout_sec:
+        lines.append(f"- conductor timeout: `{conductor_timeout_sec}s`")
+    return "\n".join(lines)
 
 
 def _working_label(dispatch: str) -> tuple[str, str]:

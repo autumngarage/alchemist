@@ -73,6 +73,17 @@ and bails (`error: "budget-exceeded: $X spent vs $Y budgeted"`) if the run
 exceeded it — the issue lands in `-error` for human triage. Set to `"$0"` or
 empty to disable enforcement.
 
+For unusually substantive issues, operators can opt that one issue into a
+longer Conductor run by adding an annotation to the issue body:
+
+```text
+alchemist-timeout: 25m
+```
+
+`alchemist-conductor-timeout: 1500s` is accepted as an equivalent explicit
+form. Overrides are bounded to 60-3600 seconds so a single issue cannot silently
+turn into an unbounded provider spend.
+
 Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
 `ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`,
 `ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
