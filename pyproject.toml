@@ -36,9 +36,6 @@ version-file = "src/alchemist/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/alchemist"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/alchemist/templates" = "alchemist/templates"
-
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
