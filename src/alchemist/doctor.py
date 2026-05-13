@@ -145,7 +145,7 @@ def _touchstone_merge_pr_script_check() -> Check:
 
 def run_doctor(config: Config) -> list[Check]:
     """Run all health checks and return the results."""
-    return [
+    checks = [
         _which_check("gh", "install GitHub CLI: https://cli.github.com/"),
         _which_check("git", "git is required"),
         _which_check("conductor", "brew install autumngarage/conductor/conductor"),
@@ -154,3 +154,16 @@ def run_doctor(config: Config) -> list[Check]:
         _state_dir_check(config.state_dir),
         _touchstone_merge_pr_script_check(),
     ]
+    if "ALCHEMIST_LABEL" in os.environ:
+        checks.append(
+            Check(
+                name="config deprecation",
+                ok=True,
+                detail=(
+                    "ALCHEMIST_LABEL is deprecated — alchemist no longer requires a dispatch "
+                    "label. The variable is honored for the state-label prefix but no longer "
+                    "gates scanning."
+                ),
+            )
+        )
+    return checks

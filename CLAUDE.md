@@ -3,22 +3,25 @@
 ## What this repo is
 
 Alchemist is the fifth tool in the Autumn Garage family — the **transmuter**.
-It watches one GitHub org for issues labelled `alchemist-dispatch`, dispatches
-each one to Conductor's agentic loop on a fresh feature branch, opens a PR,
-and hands it to Touchstone's `merge-pr.sh` which runs the AI code-review gate
-and squash-merges on a CLEAN verdict.
+A Railway cron polls one GitHub org every 5 minutes for any open issue alchemist
+has not already touched, dispatches it to Conductor's agentic loop on a fresh
+feature branch, opens a PR, and hands it to Touchstone's `merge-pr.sh` which
+runs the AI code-review gate and squash-merges on a CLEAN verdict.
 
 The full data flow:
 
 ```
-issue created
-  → alchemist detects (gh search across the org)
+cron tick (every 5 min)
+  → alchemist scans the autumn-garage org for any open issue without
+    one of its own state labels (-working/-blocked/-shipped/-declined/-error)
+    or the manual opt-out label (alchemist-skip)
   → conductor agent evaluates scope (read code / web search / just go)
   → conductor agent does the work (edits in a per-issue working dir)
   → alchemist commits + pushes (signed as `Alchemist <alchemist@autumngarage.dev>`)
   → alchemist opens PR (title prefixed `[alchemist]` for audit visibility)
   → touchstone merge-pr.sh runs review + squash-merges if CLEAN
-  → BLOCKED reviews leave the PR open with comments for human triage
+  → BLOCKED reviews leave the PR open; alchemist marks the issue
+    `alchemist-blocked` for human triage
 ```
 
 Alchemist never speaks to an LLM directly (every model call goes through
@@ -46,7 +49,7 @@ No fallbacks, no shims, no silent degradation.
 
 ## Current runtime surface
 
-- `alchemist scan` — list labelled issues across the configured org. No side effects.
+- `alchemist scan` — list open issues across the configured org. No side effects.
 - `alchemist doctor` — verify CLIs, auth, writable state, and runtime config.
   Exits non-zero when the tick should not run.
 - `alchemist banner` — print the brand surface.
@@ -57,20 +60,23 @@ No fallbacks, no shims, no silent degradation.
   comments, PR creation, and Touchstone merge-gate delegation.
 - Dockerfile bundling gh, git, conductor, touchstone, alchemist.
 - Railway cron service + persistent volume + env vars.
-- Three dogfood gates: dry-run + test label → live + test label → live + real label.
 
-## Dogfood gates (the safety story)
+## State labels (the ownership signal)
 
-The tool ships **disabled** by design. Three transitions, each manual:
+Alchemist marks every issue it touches with one of five state labels. They
+are alchemist's own bookkeeping — scanning filters out any issue that already
+carries one, so alchemist never re-processes its own outcomes:
 
-1. `dry_run=true` + `dispatch_label=alchemist-test`. Cron runs, scans, even runs
-   conductor on a scratch clone, but **skips** push/PR/label-mutation.
-2. `dry_run=false` + `dispatch_label=alchemist-test`. Real PRs against
-   intentional test issues only.
-3. `dispatch_label=alchemist-dispatch`. Real users can trigger. `max_per_tick=1`
-   for the first week, then lift the cap.
+- `alchemist-working` — actively being worked this tick.
+- `alchemist-blocked` — PR opened, Touchstone returned BLOCKED, awaiting
+  human triage.
+- `alchemist-shipped` — PR merged.
+- `alchemist-declined` — agent reviewed and judged the issue non-actionable.
+- `alchemist-error` — tooling failure mid-cycle.
 
-Never auto-graduate. Each transition is a deliberate config flip.
+To opt an issue out entirely, add the `alchemist-skip` label or close it.
+To force a retry, remove the relevant state label. The `ALCHEMIST_LABEL`
+env var is deprecated; alchemist no longer gates on a dispatch label.
 
 ## Project conventions
 

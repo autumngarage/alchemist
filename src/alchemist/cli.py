@@ -118,13 +118,13 @@ def doctor(as_json: bool) -> None:
 @main.command("scan")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human text.")
 def scan_cmd(as_json: bool) -> None:
-    """Scan the configured org for labelled issues. No side effects."""
+    """Scan the configured org for open issues. No side effects."""
     config = load_config()
     if not as_json:
         print_banner(subtitle=SUBTITLE_SCAN, version=__version__)
 
     try:
-        issues = scan(org=config.org, label=config.dispatch_label)
+        issues = scan(org=config.org)
     except ScanError as exc:
         if as_json:
             click.echo(json.dumps({"error": str(exc)}), err=True)
@@ -135,7 +135,7 @@ def scan_cmd(as_json: bool) -> None:
     if as_json:
         payload = {
             "org": config.org,
-            "label": config.dispatch_label,
+            "state_label_prefix": config.dispatch_label,
             "count": len(issues),
             "issues": [
                 {
@@ -153,11 +153,10 @@ def scan_cmd(as_json: bool) -> None:
         return
 
     click.echo(f"  org:    {config.org}")
-    click.echo(f"  label:  {config.dispatch_label}")
     click.echo(f"  found:  {len(issues)} issue(s)")
     click.echo("")
     if not issues:
-        click.echo("  (no labelled issues)")
+        click.echo("  (no open issues)")
         return
     for i in issues:
         click.echo(f"  • {i.repository}#{i.number}  {i.title}")
