@@ -900,6 +900,98 @@ def test_make_pr_timeout_without_reconciliation_raises_gh_error(
         _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b")
 
 
+def test_pr_state_for_head_returns_dict_on_success(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _pr_state_for_head
+
+    def fake_run(cmd, *args, **kwargs):
+        assert "url,number,state,mergedAt" in cmd
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout=(
+                '[{"url":"https://github.com/autumngarage/touchstone/pull/99",'
+                '"number":99,"state":"MERGED","mergedAt":"2026-05-07T11:16:50Z"}]'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _pr_state_for_head("autumngarage/touchstone", "alchemist/issue-7") == {
+        "url": "https://github.com/autumngarage/touchstone/pull/99",
+        "number": 99,
+        "state": "MERGED",
+        "mergedAt": "2026-05-07T11:16:50Z",
+    }
+
+
+def test_pr_state_for_head_returns_none_on_empty_or_failure(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _pr_state_for_head
+
+    responses = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+    ]
+
+    def fake_run(cmd, *args, **kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _pr_state_for_head("autumngarage/touchstone", "alchemist/issue-7") is None
+    assert _pr_state_for_head("autumngarage/touchstone", "alchemist/issue-7") is None
+
+
+def test_set_label_retries_once_on_gh_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _GhError, _set_label
+
+    calls = {"count": 0}
+
+    def fake_set_label_once(repo, issue_number, transition, config):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise _GhError("boom")
+
+    monkeypatch.setattr("alchemist.runner._set_label_once", fake_set_label_once)
+    monkeypatch.setattr("alchemist.runner.time.sleep", lambda _sec: None)
+
+    _set_label(
+        "autumngarage/touchstone",
+        7,
+        ("alchemist-test-working", "alchemist-test-shipped"),
+        _config(tmp_path, dry_run=False),
+    )
+
+    assert calls["count"] == 2
+
+
+def test_set_label_propagates_gh_error_after_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _GhError, _set_label
+
+    calls = {"count": 0}
+
+    def fake_set_label_once(repo, issue_number, transition, config):
+        calls["count"] += 1
+        raise _GhError("boom")
+
+    monkeypatch.setattr("alchemist.runner._set_label_once", fake_set_label_once)
+    monkeypatch.setattr("alchemist.runner.time.sleep", lambda _sec: None)
+
+    with pytest.raises(_GhError, match="boom"):
+        _set_label(
+            "autumngarage/touchstone",
+            7,
+            ("alchemist-test-working", "alchemist-test-shipped"),
+            _config(tmp_path, dry_run=False),
+        )
+
+    assert calls["count"] == 2
+
+
 def test_push_timeout_reconciles_when_remote_matches_local(monkeypatch: pytest.MonkeyPatch):
     from alchemist.runner import _push_branch, _SanitizedSubprocessTimeoutError
 
@@ -1625,6 +1717,107 @@ def test_sweep_stuck_transitions_old_working_issues(
     # Comment posted + label transition fired.
     assert len(captured["comments"]) == 1
     assert len(captured["label_transitions"]) == 1
+
+
+def test_sweep_promotes_merged_pr_to_shipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Old stuck issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+    monkeypatch.setattr(
+        "alchemist.runner._pr_state_for_head",
+        lambda repo, branch: {
+            "url": "https://github.com/autumngarage/touchstone/pull/99",
+            "number": 99,
+            "state": "MERGED",
+            "mergedAt": "2026-05-07T11:16:50Z",
+        },
+    )
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert results[0].pr_url == "https://github.com/autumngarage/touchstone/pull/99"
+    assert results[0].merged is True
+    assert len(captured["label_transitions"]) == 1
+    add_label = captured["label_transitions"][0][
+        captured["label_transitions"][0].index("--add-label") + 1
+    ]
+    assert add_label == "alchemist-test-shipped"
+
+
+def test_sweep_skips_open_pr_without_transitioning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Old stuck issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+    monkeypatch.setattr(
+        "alchemist.runner._pr_state_for_head",
+        lambda repo, branch: {
+            "url": "https://github.com/autumngarage/touchstone/pull/99",
+            "number": 99,
+            "state": "OPEN",
+            "mergedAt": None,
+        },
+    )
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert results == []
+    assert captured["label_transitions"] == []
+
+
+def test_sweep_falls_through_to_error_when_no_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from datetime import UTC, datetime, timedelta
+
+    from alchemist.runner import _sweep_stuck
+
+    old_ts = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    stuck = [{
+        "number": 42,
+        "title": "Old stuck issue",
+        "repository": {"nameWithOwner": "autumngarage/touchstone"},
+        "updatedAt": old_ts,
+    }]
+    captured = _stuck_sweep_stub(monkeypatch, stuck_items=stuck)
+    monkeypatch.setattr("alchemist.runner._pr_state_for_head", lambda repo, branch: None)
+
+    config = _config(tmp_path, dry_run=False)
+    results = _sweep_stuck(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert "stuck-sweep" in results[0].error
+    assert len(captured["label_transitions"]) == 1
+    add_label = captured["label_transitions"][0][
+        captured["label_transitions"][0].index("--add-label") + 1
+    ]
+    assert add_label == "alchemist-test-error"
 
 
 def test_sweep_stuck_label_failure_is_visible(

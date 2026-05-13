@@ -733,6 +733,52 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
         if age < threshold:
             continue
 
+        branch = _branch_name(
+            DispatchIssue(
+                number=issue_num,
+                title=item.get("title") or "",
+                body="",
+                url=f"https://github.com/{repo}/issues/{issue_num}",
+                repository=repo,
+                updated_at=updated_str,
+                labels=(working_label,),
+            )
+        )
+        pr = _pr_state_for_head(repo, branch)
+        if pr is not None and pr["mergedAt"] is not None:
+            pr_url = pr["url"]
+            _post_activity_comment(
+                repo,
+                issue_num,
+                f"alchemist: detected merged PR {pr_url}; transitioning to shipped",
+                config,
+            )
+            label_error = None
+            try:
+                _set_label(repo, issue_num, _shipped_label(config.dispatch_label), config)
+            except _GhError as exc:
+                label_error = f"label-transition: {exc}"
+                print(f"alchemist: {repo}#{issue_num}: {label_error}", file=sys.stderr)
+
+            swept.append(
+                RunResult(
+                    repo=repo,
+                    issue_number=issue_num,
+                    pr_url=pr_url,
+                    merged=True,
+                    error=label_error,
+                    elapsed_sec=0.0,
+                    dry_run=config.dry_run,
+                )
+            )
+            continue
+        if pr is not None and pr["state"] == "OPEN":
+            print(
+                f"alchemist: stuck-sweep skipping {repo}#{issue_num}: PR {pr['url']} still open",
+                file=sys.stderr,
+            )
+            continue
+
         message = (
             f"detected stuck `-working` state ({age.total_seconds() / 60:.0f} min old); "
             "transitioning to error"
@@ -772,6 +818,16 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
 def _set_label(repo: str, issue_number: int, transition: tuple[str, str], config: Config) -> None:
     if config.dry_run:
         return
+    try:
+        _set_label_once(repo, issue_number, transition, config)
+    except _GhError:
+        time.sleep(1.5)
+        _set_label_once(repo, issue_number, transition, config)
+
+
+def _set_label_once(
+    repo: str, issue_number: int, transition: tuple[str, str], config: Config
+) -> None:
     _remove, add = transition
     current_state_labels = _current_state_labels(repo, issue_number, config.dispatch_label)
     to_remove = sorted(label for label in current_state_labels if label != add)
@@ -1482,6 +1538,50 @@ def _find_pr_for_head(repo: str, branch: str) -> tuple[str, int] | None:
     if not isinstance(url, str) or not isinstance(number, int):
         return None
     return url, number
+
+
+def _pr_state_for_head(repo: str, branch: str) -> dict[str, str | int | None] | None:
+    cmd = [
+        "gh", "pr", "list",
+        "--repo", repo,
+        "--head", branch,
+        "--state", "all",
+        "--json", "url,number,state,mergedAt",
+        "--limit", "1",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+
+    first = payload[0]
+    if not isinstance(first, dict):
+        return None
+    url = first.get("url")
+    number = first.get("number")
+    state = first.get("state")
+    merged_at = first.get("mergedAt")
+    if not isinstance(url, str) or not isinstance(number, int) or not isinstance(state, str):
+        return None
+    if merged_at is not None and not isinstance(merged_at, str):
+        return None
+    return {
+        "url": url,
+        "number": number,
+        "state": state,
+        "mergedAt": merged_at,
+    }
 
 
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
