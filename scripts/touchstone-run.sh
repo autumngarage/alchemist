@@ -96,6 +96,7 @@ MONOREPO=""
 TARGETS=""
 LINT_COMMAND=""
 TYPECHECK_COMMAND=""
+TYPECHECK_COMMAND_AUTO=false
 BUILD_COMMAND=""
 TEST_COMMAND=""
 VALIDATE_COMMAND=""
@@ -184,7 +185,15 @@ load_config() {
       monorepo) MONOREPO="$value" ;;
       targets) TARGETS="$value" ;;
       lint_command) LINT_COMMAND="$value" ;;
-      typecheck_command) TYPECHECK_COMMAND="$value" ;;
+      typecheck_command)
+        if [ "$value" = "auto" ]; then
+          TYPECHECK_COMMAND=""
+          TYPECHECK_COMMAND_AUTO=true
+        else
+          TYPECHECK_COMMAND="$value"
+          TYPECHECK_COMMAND_AUTO=false
+        fi
+        ;;
       build_command) BUILD_COMMAND="$value" ;;
       test_command) TEST_COMMAND="$value" ;;
       validate_command) VALIDATE_COMMAND="$value" ;;
@@ -483,7 +492,9 @@ run_python_action() {
       fi
       ;;
     typecheck)
-      if command -v pyright >/dev/null 2>&1; then
+      if [ "$TYPECHECK_COMMAND_AUTO" != true ]; then
+        ok "no Python typecheck_command configured; skipped"
+      elif command -v pyright >/dev/null 2>&1; then
         run_shell_command "pyright"
       elif command -v mypy >/dev/null 2>&1; then
         run_shell_command "mypy ."

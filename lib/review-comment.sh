@@ -4,6 +4,7 @@
 #
 # Public interface:
 #   format_clean_review_comment <review-summary-json>
+#   format_review_failure_comment <review-summary-json> <review-output> [retry-command] [failed-provider-csv]
 #   format_advisory_findings_comment <review-summary-json> <review-output>
 #   format_findings_history_comment <history-jsonl-path>
 #   post_pr_review_comment <pr-number> <comment-string>
@@ -50,6 +51,59 @@ format_clean_review_comment() {
 
   printf '%s review clean - provider: %s, model: %s, peer: %s, iterations: %s, mode: %s, findings: %s' \
     "$reviewer" "$provider" "$model" "$peer" "$iterations" "$mode" "$findings"
+}
+
+format_review_failure_comment() {
+  local json="$1"
+  local output="${2:-}"
+  local retry_command="${3:-}"
+  local failed_providers="${4:-}"
+  local reviewer provider model peer iterations mode findings exit_reason fallback_primary fallback_retry fallback_reason fallback_excluded
+  local findings_block output_excerpt
+
+  reviewer="$(review_comment_clean_value "$(review_comment_json_field "$json" reviewer)")"
+  provider="$(review_comment_clean_value "$(review_comment_json_field "$json" provider)")"
+  model="$(review_comment_clean_value "$(review_comment_json_field "$json" model)")"
+  peer="$(review_comment_clean_value "$(review_comment_json_field "$json" peer_provider)")"
+  iterations="$(review_comment_clean_value "$(review_comment_json_number "$json" iterations)")"
+  mode="$(review_comment_clean_value "$(review_comment_json_field "$json" mode)")"
+  findings="$(review_comment_clean_value "$(review_comment_json_number "$json" findings)")"
+  exit_reason="$(review_comment_clean_value "$(review_comment_json_field "$json" exit_reason)")"
+  fallback_primary="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_primary_provider)")"
+  fallback_retry="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_retry_provider)")"
+  fallback_reason="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_reason)")"
+  fallback_excluded="$(review_comment_clean_value "$(review_comment_json_field "$json" fallback_excluded_providers)")"
+  findings_block="$(review_comment_findings_from_output "$output")"
+  output_excerpt="$(printf '%s\n' "$output" | sed -n '1,80p')"
+
+  {
+    if [ "${findings:-0}" != "0" ] || [ -n "$findings_block" ]; then
+      printf '%s merge review blocked with concrete finding(s) - exit: %s, provider: %s, model: %s, peer: %s, iterations: %s, mode: %s, findings: %s\n\n' \
+        "$reviewer" "$exit_reason" "$provider" "$model" "$peer" "$iterations" "$mode" "$findings"
+    else
+      printf '%s merge review failed before a trusted clean verdict - exit: %s, provider: %s, model: %s, peer: %s, iterations: %s, mode: %s, findings: %s\n\n' \
+        "$reviewer" "$exit_reason" "$provider" "$model" "$peer" "$iterations" "$mode" "$findings"
+    fi
+
+    if [ -n "$failed_providers" ]; then
+      printf -- '- Failed/stalled provider(s): `%s`\n' "$failed_providers"
+    fi
+    if [ "$fallback_primary" != "unknown" ] || [ "$fallback_retry" != "unknown" ] || [ "$fallback_reason" != "unknown" ]; then
+      printf -- '- Fallback: `%s` -> `%s` (%s)\n' "$fallback_primary" "$fallback_retry" "$fallback_reason"
+    fi
+    if [ "$fallback_excluded" != "unknown" ]; then
+      printf -- '- Fallback excluded: `%s`\n' "$fallback_excluded"
+    fi
+    if [ -n "$retry_command" ]; then
+      printf -- '- Retry: `%s`\n' "$retry_command"
+    fi
+
+    if [ -n "$findings_block" ]; then
+      printf '\n%s\n' "$findings_block"
+    elif [ -n "$output_excerpt" ]; then
+      printf '\n<details>\n<summary>Review transcript excerpt</summary>\n\n```text\n%s\n```\n</details>\n' "$output_excerpt"
+    fi
+  }
 }
 
 format_advisory_findings_comment() {

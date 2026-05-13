@@ -2,6 +2,7 @@
 .touchstone-manifest
 .touchstone-version
 TOUCHSTONE.md
+.github/workflows/issue-claim-check.yml
 principles/README.md
 principles/agent-swarms.md
 principles/ai-delivery-architecture.md
@@ -11,6 +12,7 @@ principles/engineering-principles.md
 principles/file-upstream-bugs.md
 principles/git-workflow.md
 principles/pre-implementation-checklist.md
+scripts/conductor-review.sh
 scripts/codex-review.sh
 scripts/branch-guard.sh
 scripts/emergency-disclosure.sh
@@ -18,6 +20,8 @@ scripts/cortex-pr-merged-hook.sh
 scripts/touchstone-run.sh
 scripts/open-pr.sh
 scripts/merge-pr.sh
+scripts/claim-issue.sh
+scripts/issue-claim-check.sh
 scripts/cleanup-branches.sh
 scripts/spawn-worktree.sh
 scripts/cleanup-worktrees.sh
@@ -25,9 +29,9 @@ scripts/worker.sh
 lib/toml.sh
 lib/events.sh
 lib/worker-state.sh
+lib/script-sync-guard.sh
 lib/preflight.sh
 lib/preflight-scope.sh
 lib/review-comment.sh
 scripts/run-pytest-in-venv.sh
 .claude/settings.json
-.claude/skills/touchstone-audit/SKILL.md

@@ -163,17 +163,17 @@ touchstone_preflight_run_list() {
   local file
   local rc=0
 
-  if ! command -v "$command_name" >/dev/null 2>&1; then
-    touchstone_preflight_skip "$label ($command_name not installed)"
-    return 0
-  fi
-
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     files+=("$file")
   done
   if [ "${#files[@]}" -eq 0 ]; then
     touchstone_preflight_skip "$label (no matching files)"
+    return 0
+  fi
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    touchstone_preflight_skip "$label ($command_name not installed)"
     return 0
   fi
 

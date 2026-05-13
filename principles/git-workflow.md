@@ -33,13 +33,13 @@ The three layers are complementary — the local hook catches the honest mistake
 
 ### Touchstone CLI auto-sync
 
-When a brew-installed `touchstone` CLI runs a write-capable command inside a Touchstone-aware project, it compares the project's recorded `.touchstone-version` with the installed Touchstone version. If they differ and no dirty path overlaps planned Touchstone writes, the CLI runs the same `touchstone update` path before the requested command so `principles/`, `hooks/`, and `scripts/` stay current.
+When a brew-installed `touchstone` CLI runs a write-capable command inside a Touchstone-aware project, it compares the project's recorded `.touchstone-version` with the installed Touchstone version. Minor and major version drift triggers the same `touchstone update` path before the requested command so `principles/`, `hooks/`, and `scripts/` stay current; patch-only semver drift does not auto-sync project files. Source checkouts record git SHAs instead of semver, so any SHA drift still syncs.
 
 If the project worktree is dirty, auto-sync compares dirty paths with the planned Touchstone write set and skips only when they overlap; unrelated dirty paths are reported in one line and sync proceeds. The user's pending work is never stashed, overwritten outside that planned write set, or committed separately. `touchstone version`, help, status, diff, doctor, list, changelog, and other read-only commands do not trigger auto-sync.
 
 When a sync attempt skips, Touchstone appends a project-local audit entry to `.git/touchstone/sync-skips.jsonl`. Later `touchstone <subcmd>` invocations warn when the project is still behind the installed Touchstone and the skip trail is persistent enough to indicate drift; the warning is informational and never blocks the subcommand.
 
-Set `TOUCHSTONE_NO_AUTO_UPDATE=1` to disable both CLI self-update and project auto-sync. Set `TOUCHSTONE_NO_AUTO_PROJECT_SYNC=1` to keep CLI self-update enabled but disable only the per-project sync. Set `TOUCHSTONE_FORCE_OVERLAP=1` to force project sync through dirty paths that overlap planned Touchstone writes. Set `TOUCHSTONE_NO_DRIFT_WARNING=1` to suppress skipped-sync drift warnings in scripted output.
+Use `touchstone --no-auto-sync <subcommand>` to disable project auto-sync for one invocation. Set `sync_auto=false` in `.touchstone-config` to opt the project out persistently. Set `TOUCHSTONE_NO_AUTO_UPDATE=1` to disable both CLI self-update and project auto-sync. Set `TOUCHSTONE_NO_AUTO_PROJECT_SYNC=1` to keep CLI self-update enabled but disable only the per-project sync. Set `TOUCHSTONE_FORCE_OVERLAP=1` to force project sync through dirty paths that overlap planned Touchstone writes. Set `TOUCHSTONE_NO_DRIFT_WARNING=1` to suppress skipped-sync drift warnings in scripted output.
 
 ## Commit discipline
 
@@ -50,6 +50,8 @@ Set `TOUCHSTONE_NO_AUTO_UPDATE=1` to disable both CLI self-update and project au
 **Concise commit messages.** Lead with *what* changed in the subject line. Use the body to explain *why* when the why isn't obvious from the diff. The PR description handles the broader narrative; commit messages are the per-step record.
 
 **Issue-closing trailers.** When a commit is meant to resolve a GitHub issue, add a body trailer such as `Closes-issue: #123` (or `Closes: #123`, `Fixes: #123`, `Refs: #123`). `scripts/open-pr.sh` scans commits unique to the branch and injects a `Closes #123` line into the PR body, so the issue auto-closes when the PR merges.
+
+**Issue reconciliation before PR.** Treat issue state as part of delivery, not cleanup after the fact. Before opening the PR, make a short ledger of every issue you touched: fixed, partially fixed, made stale, or investigated and left open. Fixed issues must be represented by closing trailers or explicit `Closes #N` lines in the PR body. Partial fixes get `Refs #N` plus an issue comment that names what landed and what remains. Stale issues get a comment with the commit/test evidence before closing. The invariant is simple: after a merge, a reader scanning GitHub issues should not have to infer whether a shipped fix was forgotten, partial, or unrelated.
 
 **Stage explicit file paths.** Avoid `git add -A` or `git add .` — they accidentally stage sensitive files (`.env`, credentials) or large binaries. Naming files makes intent visible at the staging step.
 
@@ -75,7 +77,7 @@ Set `TOUCHSTONE_NO_AUTO_UPDATE=1` to disable both CLI self-update and project au
 
 ## Conductor merge review (optional, recommended)
 
-If the project has AI review configured (see `.codex-review.toml` for policy and the `codex-review` hook in `.pre-commit-config.yaml` for the entry point), the required LLM review belongs to the merge gate. The hook delegates model access to Conductor, so the reviewer may be Claude, Codex, Gemini, a local model, or another configured provider. Feature-branch pushes should stay cheap; the expensive path is `scripts/open-pr.sh --auto-merge`: open PR → deterministic preflight → Conductor review/fix loop → deterministic postflight when needed → squash-merge → branch deleted. There is no separate required PR-open advisory review in the core architecture.
+If the project has AI review configured (see `.touchstone-review.toml` for policy and the `conductor-review` hook in `.pre-commit-config.yaml` for the entry point), the required LLM review belongs to the merge gate. Legacy `.codex-review.toml` configs and `codex-review` hooks still work as compatibility names. The hook delegates model access to Conductor, so the reviewer may be Claude, Codex, Gemini, a local model, or another configured provider. Feature-branch pushes should stay cheap; the expensive path is `scripts/open-pr.sh --auto-merge`: open PR → deterministic preflight → Conductor review/fix loop → deterministic postflight when needed → squash-merge → branch deleted. There is no separate required PR-open advisory review in the core architecture.
 
 **AI review is advisory.** It does not replace deterministic checks (lint, tests, type checking). It catches semantic bugs and policy violations that automated tools miss; it does not guarantee correctness.
 
@@ -94,10 +96,10 @@ The fail-open taxonomy codes are:
 | `FAIL_OPEN_PROVIDER_UNAVAILABLE` | Conductor installed but no provider configured |
 | `FAIL_OPEN_REVIEWER_ERROR` | Reviewer crashed or returned non-zero |
 
-To make infra failures fatal instead, set `on_error = "fail-closed"` in `.codex-review.toml`.
+To make infra failures fatal instead, set `on_error = "fail-closed"` in `.touchstone-review.toml`.
 
 Behavior:
-- `merge-pr.sh` invokes `scripts/codex-review.sh`, which routes LLM review through Conductor against the diff vs the default branch
+- `merge-pr.sh` invokes `scripts/conductor-review.sh`, which routes LLM review through Conductor against the diff vs the default branch
 - Auto-fixes only low-risk findings (typos, missing imports, missing null checks, adding logging to empty exception handlers, named constants for unexplained magic numbers); anything that changes business logic or retry/error-handling semantics is reported as a finding for the author to address before merge
 - Blocks merge for unsafe findings (high-scrutiny paths)
 - Loops up to `max_iterations` times (default 3)
@@ -189,12 +191,13 @@ When one lane closes multiple issues (e.g., Wave 1's Lane A bundling shfmt + mar
 
 **Deterministic enforcement.**
 
-Two layers back the convention so a missed claim doesn't reach merge silently:
+Three layers back the convention so a missed claim doesn't reach merge silently:
 
 - **`scripts/claim-issue.sh`** is the canonical claim path. It does the claim + dispatch comment in one step, and detects races (another assignee appeared between the API read and write — back off, exit non-zero so the dispatching agent knows not to spawn a worker). Use it instead of raw `gh issue edit` when an agent is about to start work.
+- **`scripts/open-pr.sh`** runs `scripts/issue-claim-check.sh` locally before creating a new PR and before auto-merging an existing PR. If the PR body closes an open issue that is not assigned to the PR author, it fails before spending merge-gate review time.
 - **`.github/workflows/issue-claim-check.yml`** runs on every `pull_request` open/edit/synchronize. It parses `Closes #N` / `Fixes #N` / `Resolves #N` / `Closes-issue: #N` from the PR body, fetches each open referenced issue, and fails the check if the PR author is not in the issue's assignees. The failure posts a comment on the PR explaining what to fix.
 
-The CI check is the hard backstop: even if an agent skips the dispatch-time claim, a PR that tries to close an unclaimed issue fails its checks and won't auto-merge.
+The local check is the fast path: it stops the common mistake before a PR exists or before merge review runs. The CI check is the hard backstop: even if an agent bypasses the local script, a PR that tries to close an unclaimed issue fails its checks and won't auto-merge.
 
 **Bypass token: `[skip-claim-check]`.**
 

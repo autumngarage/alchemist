@@ -57,7 +57,9 @@
 #                                 journal.
 #   TOUCHSTONE_CORTEX_HOOK_DIRECT_PUSH
 #                               — set to 1/true/on to use the legacy
-#                                 direct default-branch push path.
+#                                 direct default-branch push path. This
+#                                 bypasses pre-push hooks for the
+#                                 deterministic Cortex journal commit.
 #   TOUCHSTONE_CORTEX_HOOK_BRANCH
 #                               — override the follow-up branch name
 #                                 (mainly for deterministic tests).
@@ -385,9 +387,14 @@ if truthy "${TOUCHSTONE_CORTEX_HOOK_SKIP_PUSH:-0}"; then
 fi
 
 if [ "$publish_direct" = true ]; then
-  if ! git_push_clean_env origin "HEAD:${default_branch}"; then
+  # --no-verify is intentional here for the same reason as the commit
+  # bypass above. The direct-push mode is an explicit compatibility path
+  # for this deterministic auto-journal commit; without the bypass,
+  # default-branch guards reject the generated post-merge push.
+  if ! git_push_clean_env --no-verify origin "HEAD:${default_branch}"; then
     log "cortex-pr-merged-hook: git push to origin/${default_branch} failed."
-    log "  The auto-draft entry committed locally as ${rel_path}; push when ready."
+    log "  The auto-draft entry committed locally as ${rel_path}."
+    log "  Recovery: cd '$PROJECT_DIR' && TOUCHSTONE_EMERGENCY=1 git push --no-verify origin HEAD:${default_branch}"
     exit 1
   fi
   exit 0

@@ -12,6 +12,7 @@
 #   3. Squash-merges and deletes the remote branch.
 #   4. Checks out/syncs the default branch where the local topology permits.
 #   5. Deletes the verified-merged local feature branch when safe.
+#   6. Removes the merged feature worktree when safe.
 #
 # Exit codes:
 #   0 — merged cleanly
@@ -23,7 +24,16 @@ set -euo pipefail
 PR_NUMBER=""
 BYPASS_REASON=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REVIEW_SCRIPT="$SCRIPT_DIR/codex-review.sh"
+SCRIPT_SYNC_GUARD="$SCRIPT_DIR/../lib/script-sync-guard.sh"
+if [ -f "$SCRIPT_SYNC_GUARD" ]; then
+  # shellcheck source=../lib/script-sync-guard.sh
+  source "$SCRIPT_SYNC_GUARD"
+  touchstone_script_sync_guard "$0" "$@"
+fi
+REVIEW_SCRIPT="$SCRIPT_DIR/conductor-review.sh"
+if [ ! -f "$REVIEW_SCRIPT" ]; then
+  REVIEW_SCRIPT="$SCRIPT_DIR/codex-review.sh"
+fi
 PREFLIGHT_SCRIPT="$SCRIPT_DIR/../lib/preflight.sh"
 REVIEW_COMMENT_SCRIPT="$SCRIPT_DIR/../lib/review-comment.sh"
 if [ -f "$SCRIPT_DIR/../lib/events.sh" ]; then
@@ -48,6 +58,10 @@ PREFLIGHT_REQUIRED=true
 COMMENT_ON_CLEAN=true
 COMMENT_FINDINGS_HISTORY=true
 REVIEW_SUMMARY_FILE=""
+PREFLIGHT_CACHE_KEY=""
+PREFLIGHT_CACHE_FILE=""
+PREFLIGHT_CACHE_INPUTS=""
+PR_WORKTREE_PATH=""
 
 on_merge_exit() {
   local rc="$?"
@@ -92,6 +106,154 @@ trim() {
   printf '%s' "$value"
 }
 
+csv_contains() {
+  local csv="$1"
+  local wanted="$2"
+  local item
+  local -a csv_items
+
+  if [ -n "$csv" ]; then
+    IFS=',' read -r -a csv_items <<<"$csv"
+    for item in "${csv_items[@]}"; do
+      item="$(trim "$item")"
+      if [ "$item" = "$wanted" ]; then
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+csv_add_unique() {
+  local csv="$1"
+  local value="$2"
+
+  value="$(trim "$value")"
+  [ -n "$value" ] || {
+    printf '%s' "$csv"
+    return 0
+  }
+  [ "$value" != "unknown" ] || {
+    printf '%s' "$csv"
+    return 0
+  }
+  [ "$value" != "none" ] || {
+    printf '%s' "$csv"
+    return 0
+  }
+  if csv_contains "$csv" "$value"; then
+    printf '%s' "$csv"
+  elif [ -n "$csv" ]; then
+    printf '%s,%s' "$csv" "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+summary_string_field() {
+  local field="$1"
+  [ -n "$REVIEW_SUMMARY_FILE" ] || return 0
+  [ -f "$REVIEW_SUMMARY_FILE" ] || return 0
+  sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$REVIEW_SUMMARY_FILE" 2>/dev/null | head -1
+}
+
+summary_number_field() {
+  local field="$1"
+  [ -n "$REVIEW_SUMMARY_FILE" ] || return 0
+  [ -f "$REVIEW_SUMMARY_FILE" ] || return 0
+  sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$REVIEW_SUMMARY_FILE" 2>/dev/null | head -1
+}
+
+review_output_has_concrete_findings() {
+  local output_file="$1"
+  [ -f "$output_file" ] || return 1
+  grep -Eq 'CODEX_REVIEW_BLOCKED|^- ' "$output_file"
+}
+
+review_failure_is_infra() {
+  local review_rc="$1"
+  local output_file="$2"
+  local findings exit_reason
+
+  review_output_has_concrete_findings "$output_file" && return 1
+
+  findings="$(summary_number_field findings)"
+  if [ -n "$findings" ] && [ "$findings" != "0" ]; then
+    return 1
+  fi
+
+  exit_reason="$(summary_string_field exit_reason)"
+  case "$exit_reason" in
+    timeout | error | provider-unavailable | dependency-missing | malformed-sentinel) return 0 ;;
+    blocked | worktree-mutated | max-iterations) return 1 ;;
+  esac
+
+  [ "$review_rc" -eq 124 ] && return 0
+  return 1
+}
+
+review_failed_provider_csv() {
+  local csv field value item
+  local -a provider_items
+
+  csv=""
+  for field in provider fallback_primary_provider fallback_retry_provider fallback_excluded_providers; do
+    value="$(summary_string_field "$field")"
+    if [ -n "$value" ]; then
+      IFS=',' read -r -a provider_items <<<"$value"
+      for item in "${provider_items[@]}"; do
+        csv="$(csv_add_unique "$csv" "$item")"
+      done
+    fi
+  done
+  printf '%s' "$csv"
+}
+
+recommended_retry_provider() {
+  local failed_csv="$1"
+  local provider
+
+  for provider in openrouter claude codex gemini kimi deepseek-chat deepseek-reasoner; do
+    if ! csv_contains "$failed_csv" "$provider"; then
+      printf '%s' "$provider"
+      return 0
+    fi
+  done
+  printf 'openrouter'
+}
+
+review_infra_retry_command() {
+  local failed_csv retry_provider
+
+  failed_csv="$(review_failed_provider_csv)"
+  retry_provider="$(recommended_retry_provider "$failed_csv")"
+  printf 'TOUCHSTONE_CONDUCTOR_WITH=%s bash scripts/merge-pr.sh %s' "$retry_provider" "$PR_NUMBER"
+}
+
+print_review_infra_retry_guidance() {
+  local failed_csv exit_reason fallback_reason retry_command
+
+  failed_csv="$(review_failed_provider_csv)"
+  exit_reason="$(summary_string_field exit_reason)"
+  fallback_reason="$(summary_string_field fallback_reason)"
+  [ -n "$exit_reason" ] || exit_reason="reviewer-infrastructure"
+  retry_command="$(review_infra_retry_command)"
+
+  echo "" >&2
+  echo "Provider/infrastructure outage details:" >&2
+  echo "  deterministic preflight: clean" >&2
+  echo "  concrete findings: 0" >&2
+  echo "  review exit reason: $exit_reason" >&2
+  if [ -n "$fallback_reason" ]; then
+    echo "  fallback reason: $fallback_reason" >&2
+  fi
+  if [ -n "$failed_csv" ]; then
+    echo "  failed/stalled provider(s): $failed_csv" >&2
+  fi
+  echo "  retry command: $retry_command" >&2
+  echo "  alternate route: TOUCHSTONE_CONDUCTOR_WITH=<configured-hosted-provider> bash scripts/merge-pr.sh $PR_NUMBER" >&2
+}
+
 BYPASS_REASON="$(trim "$(printf '%s' "$BYPASS_REASON" | tr '\r\n\t' '   ')")"
 
 if [ -z "$PR_NUMBER" ] || ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -128,7 +290,14 @@ normalize_bool() {
 
 load_merge_review_config() {
   local config_file
-  config_file="$(git rev-parse --show-toplevel 2>/dev/null)/.codex-review.toml"
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$repo_root" ] || return 0
+  if [ -f "$repo_root/.touchstone-review.toml" ]; then
+    config_file="$repo_root/.touchstone-review.toml"
+  else
+    config_file="$repo_root/.codex-review.toml"
+  fi
   [ -f "$config_file" ] || return 0
   [ -f "$SCRIPT_DIR/../lib/toml.sh" ] || return 0
 
@@ -175,6 +344,156 @@ marker_field() {
   local field="$1"
   local marker="$2"
   awk -F= -v key="$field" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$marker"
+}
+
+preflight_hash_stream() {
+  shasum -a 256 | awk '{ print $1 }'
+}
+
+preflight_hash_file() {
+  local path="$1"
+
+  if [ -f "$path" ]; then
+    shasum -a 256 "$path" | awk '{ print $1 }'
+  else
+    printf 'missing'
+  fi
+}
+
+preflight_hash_paths() {
+  local repo_root="$1"
+  shift
+  local rel path
+
+  for rel in "$@"; do
+    path="$repo_root/$rel"
+    printf '%s\t%s\n' "$rel" "$(preflight_hash_file "$path")"
+  done | preflight_hash_stream
+}
+
+preflight_hash_file_list() {
+  local label path
+
+  while [ "$#" -gt 0 ]; do
+    label="$1"
+    path="$2"
+    shift 2
+    printf '%s\t%s\n' "$label" "$(preflight_hash_file "$path")"
+  done | preflight_hash_stream
+}
+
+preflight_worktree_hash() {
+  {
+    git status --porcelain
+    printf '\n-- worktree diff --\n'
+    git diff --binary
+    printf '\n-- index diff --\n'
+    git diff --cached --binary
+  } 2>/dev/null | preflight_hash_stream
+}
+
+preflight_changed_paths_hash() {
+  local base_ref="$1"
+
+  git diff --name-only "$base_ref"...HEAD 2>/dev/null \
+    | sort -u \
+    | preflight_hash_stream
+}
+
+preflight_cache_inputs() {
+  local base_ref="$1"
+  local event_mode="$2"
+  local repo_root head_sha base_sha merge_base changed_paths_hash
+  local checker_hash config_hash worktree_hash
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  head_sha="$(git rev-parse HEAD 2>/dev/null)" || return 1
+  base_sha="$(git rev-parse --verify "$base_ref^{commit}" 2>/dev/null)" || return 1
+  merge_base="$(git merge-base "$base_ref" "$head_sha" 2>/dev/null)" || return 1
+  changed_paths_hash="$(preflight_changed_paths_hash "$base_ref")" || return 1
+  checker_hash="$(preflight_hash_file_list \
+    "lib/preflight.sh" "$PREFLIGHT_SCRIPT" \
+    "lib/preflight-scope.sh" "$(dirname "$PREFLIGHT_SCRIPT")/preflight-scope.sh" \
+    "scripts/touchstone-run.sh" "$SCRIPT_DIR/touchstone-run.sh")"
+  config_hash="$(preflight_hash_paths "$repo_root" \
+    ".touchstone-review.toml" \
+    ".codex-review.toml" \
+    ".touchstone-config" \
+    ".touchstone-version" \
+    ".pre-commit-config.yaml" \
+    ".markdownlint.json")"
+  worktree_hash="$(preflight_worktree_hash)" || return 1
+
+  printf 'version=1\n'
+  printf 'repo_root=%s\n' "$repo_root"
+  printf 'scope=diff\n'
+  printf 'event_mode=%s\n' "$event_mode"
+  printf 'base_ref=%s\n' "$base_ref"
+  printf 'base_sha=%s\n' "$base_sha"
+  printf 'head_sha=%s\n' "$head_sha"
+  printf 'merge_base=%s\n' "$merge_base"
+  printf 'changed_paths_hash=%s\n' "$changed_paths_hash"
+  printf 'checker_hash=%s\n' "$checker_hash"
+  printf 'config_hash=%s\n' "$config_hash"
+  printf 'worktree_hash=%s\n' "$worktree_hash"
+}
+
+preflight_cache_prepare() {
+  local base_ref="$1"
+  local event_mode="$2"
+  local cache_dir
+
+  PREFLIGHT_CACHE_KEY=""
+  PREFLIGHT_CACHE_FILE=""
+  PREFLIGHT_CACHE_INPUTS=""
+
+  if truthy "${TOUCHSTONE_PREFLIGHT_DISABLE_CACHE:-false}"; then
+    return 1
+  fi
+
+  PREFLIGHT_CACHE_INPUTS="$(preflight_cache_inputs "$base_ref" "$event_mode")" || return 1
+  PREFLIGHT_CACHE_KEY="$(printf '%s\n' "$PREFLIGHT_CACHE_INPUTS" | preflight_hash_stream)"
+  cache_dir="$(git rev-parse --git-path touchstone/preflight-clean 2>/dev/null)" || return 1
+  PREFLIGHT_CACHE_FILE="$cache_dir/$PREFLIGHT_CACHE_KEY.clean"
+}
+
+preflight_cache_short_key() {
+  printf '%s' "${PREFLIGHT_CACHE_KEY:0:12}"
+}
+
+preflight_cache_hit() {
+  local marker_inputs
+
+  [ -n "$PREFLIGHT_CACHE_FILE" ] || return 1
+  [ -f "$PREFLIGHT_CACHE_FILE" ] || return 1
+  grep -q '^result=preflight_clean$' "$PREFLIGHT_CACHE_FILE" || return 1
+  marker_inputs="$(sed '1,2d' "$PREFLIGHT_CACHE_FILE")"
+  [ "$marker_inputs" = "$PREFLIGHT_CACHE_INPUTS" ]
+}
+
+write_preflight_clean_cache() {
+  local cache_dir tmp
+
+  [ -n "$PREFLIGHT_CACHE_FILE" ] || return 0
+  [ -n "$PREFLIGHT_CACHE_INPUTS" ] || return 0
+  cache_dir="$(dirname "$PREFLIGHT_CACHE_FILE")"
+  if ! mkdir -p "$cache_dir" 2>/dev/null; then
+    echo "WARNING: could not create preflight cache directory $cache_dir; continuing without cache." >&2
+    return 0
+  fi
+
+  tmp="$PREFLIGHT_CACHE_FILE.$$"
+  if {
+    printf 'result=preflight_clean\n'
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+    printf '%s\n' "$PREFLIGHT_CACHE_INPUTS"
+  } >"$tmp" 2>/dev/null && mv "$tmp" "$PREFLIGHT_CACHE_FILE" 2>/dev/null; then
+    return 0
+  fi
+
+  rm -f "$tmp" 2>/dev/null || true
+  echo "WARNING: could not write preflight cache marker $PREFLIGHT_CACHE_FILE; continuing without cache." >&2
+  return 0
 }
 
 worktree_path_for_branch() {
@@ -336,6 +655,7 @@ cleanup_local_pr_branch_after_merge() {
     echo "WARNING: Local branch '$branch' is at $local_head, not reviewed PR head $reviewed_head; leaving it intact." >&2
     return 0
   fi
+  [ -n "$PR_WORKTREE_PATH" ] || PR_WORKTREE_PATH="$(worktree_path_for_branch "$branch" | head -n 1)"
   pr_state="$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "")"
   if [ "$pr_state" != "MERGED" ]; then
     echo "WARNING: PR #$PR_NUMBER is not confirmed MERGED (state: ${pr_state:-unknown}); leaving local branch '$branch' intact." >&2
@@ -352,6 +672,46 @@ cleanup_local_pr_branch_after_merge() {
   else
     echo "WARNING: Could not delete local branch '$branch' after verified merge." >&2
     echo "WARNING: Run this when convenient after moving off the branch: git branch -D '$branch'" >&2
+  fi
+}
+
+cleanup_pr_worktree_after_merge() {
+  local pr_worktree="$PR_WORKTREE_PATH"
+  local current_worktree default_worktree dirty_status
+
+  [ -n "$pr_worktree" ] || return 0
+  if [ ! -d "$pr_worktree" ]; then
+    echo "WARNING: Merged PR worktree '$pr_worktree' is missing; run 'git worktree prune' if Git still records it." >&2
+    return 0
+  fi
+
+  current_worktree="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+  default_worktree="$(worktree_path_for_branch "$DEFAULT_BRANCH" | head -n 1)"
+  if [ -z "$default_worktree" ] || [ ! -d "$default_worktree" ]; then
+    default_worktree="$current_worktree"
+  fi
+  if [ -z "$default_worktree" ] || [ "$default_worktree" = "$pr_worktree" ]; then
+    echo "WARNING: No separate default-branch worktree is available to remove merged PR worktree '$pr_worktree'." >&2
+    echo "         Run 'bash scripts/cleanup-worktrees.sh --execute' after moving to a different worktree." >&2
+    return 0
+  fi
+
+  dirty_status="$(git -C "$pr_worktree" status --porcelain 2>/dev/null || printf 'status-failed\n')"
+  if [ -n "$dirty_status" ]; then
+    echo "WARNING: Merged PR worktree '$pr_worktree' has uncommitted changes; leaving it in place." >&2
+    echo "         Inspect it, then run 'bash scripts/cleanup-worktrees.sh --execute' when it is clean." >&2
+    return 0
+  fi
+
+  echo "==> Removing merged PR worktree '$pr_worktree' ..."
+  touchstone_emit_event cleanup_started worktree_path="$pr_worktree"
+  if git -C "$default_worktree" worktree remove "$pr_worktree"; then
+    echo "==> Merged PR worktree removed."
+    touchstone_emit_event cleanup_done worktree_path="$pr_worktree" result=removed
+  else
+    echo "WARNING: Could not remove merged PR worktree '$pr_worktree'." >&2
+    echo "         Run 'bash scripts/cleanup-worktrees.sh --execute' from $default_worktree to inspect and clean up." >&2
+    touchstone_emit_event cleanup_done worktree_path="$pr_worktree" result=failed
   fi
 }
 
@@ -440,7 +800,7 @@ record_bypass_comment() {
 
 post_clean_review_comment() {
   local summary_file="$1"
-  local summary_json comment
+  local summary_json comment exit_reason
 
   if ! truthy "$COMMENT_ON_CLEAN"; then
     echo "==> Clean-review PR comment disabled by [review].comment_on_clean=false."
@@ -465,6 +825,21 @@ post_clean_review_comment() {
     return 0
   fi
 
+  exit_reason="$(review_comment_json_field "$summary_json" exit_reason 2>/dev/null || true)"
+  if [ -n "$exit_reason" ] && [ "$exit_reason" != "clean" ]; then
+    if declare -F format_review_failure_comment >/dev/null 2>&1; then
+      comment="$(format_review_failure_comment "$summary_json" "" "" "")"
+      if post_pr_review_comment "$PR_NUMBER" "$comment"; then
+        echo "==> Posted non-clean review summary PR comment (exit_reason=$exit_reason)."
+        return 0
+      fi
+      echo "WARNING: failed to post non-clean review summary comment for PR #$PR_NUMBER." >&2
+    else
+      echo "WARNING: review summary exit_reason=$exit_reason; skipping clean-review comment." >&2
+    fi
+    return 0
+  fi
+
   comment="$(format_clean_review_comment "$summary_json")"
   if post_pr_review_comment "$PR_NUMBER" "$comment"; then
     echo "==> Posted clean-review PR comment."
@@ -472,6 +847,45 @@ post_clean_review_comment() {
   fi
 
   echo "WARNING: failed to post clean-review PR comment for PR #$PR_NUMBER." >&2
+  return 0
+}
+
+post_review_failure_comment() {
+  local review_output_file="$1"
+  local infra_failure="$2"
+  local summary_json output comment retry_command failed_csv
+
+  if [ "$BYPASS_REVIEW" = true ]; then
+    return 0
+  fi
+  if ! declare -F format_review_failure_comment >/dev/null 2>&1 \
+    || ! declare -F post_pr_review_comment >/dev/null 2>&1; then
+    echo "WARNING: review comment helper not found at $REVIEW_COMMENT_SCRIPT; skipping review-failure comment." >&2
+    return 0
+  fi
+
+  if [ -n "$REVIEW_SUMMARY_FILE" ] && [ -f "$REVIEW_SUMMARY_FILE" ]; then
+    summary_json="$(tail -n 1 "$REVIEW_SUMMARY_FILE" 2>/dev/null || true)"
+  else
+    summary_json='{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","iterations":0,"mode":"fix","findings":0,"exit_reason":"reviewer-infrastructure"}'
+  fi
+  [ -n "$summary_json" ] || summary_json='{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","iterations":0,"mode":"fix","findings":0,"exit_reason":"reviewer-infrastructure"}'
+
+  output="$(cat "$review_output_file" 2>/dev/null || true)"
+  retry_command=""
+  failed_csv=""
+  if [ "$infra_failure" = true ]; then
+    retry_command="$(review_infra_retry_command)"
+    failed_csv="$(review_failed_provider_csv)"
+  fi
+
+  comment="$(format_review_failure_comment "$summary_json" "$output" "$retry_command" "$failed_csv")"
+  if post_pr_review_comment "$PR_NUMBER" "$comment"; then
+    echo "==> Posted review-failure PR comment."
+    return 0
+  fi
+
+  echo "WARNING: failed to post review-failure PR comment for PR #$PR_NUMBER." >&2
   return 0
 }
 
@@ -537,8 +951,85 @@ print_failed_checks_and_exit() {
   exit 1
 }
 
+wait_for_clean_merge_state() {
+  local attempt max_attempts sleep_seconds
+
+  echo "==> Checking merge state for PR #$PR_NUMBER ..."
+  STATE=""
+  MERGEABLE=""
+  MERGE_STATE_RETRY_DELAYS=(1 2 5 10 30 30 30 30 30)
+  max_attempts="${MERGE_PR_STATE_MAX_ATTEMPTS:-30}"
+  if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || [ "$max_attempts" -lt 1 ]; then
+    max_attempts=30
+  fi
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    MERGE_STATE="$(gh pr view "$PR_NUMBER" --json mergeStateStatus,mergeable --template '{{.mergeStateStatus}} {{.mergeable}}' 2>/dev/null || echo '')"
+    STATE="${MERGE_STATE%% *}"
+    MERGEABLE="${MERGE_STATE#* }"
+    [ -n "$STATE" ] || STATE="UNKNOWN"
+    [ -n "$MERGEABLE" ] || MERGEABLE="UNKNOWN"
+    echo "    attempt $attempt: mergeStateStatus=$STATE mergeable=$MERGEABLE"
+    if [ "$STATE" = "CLEAN" ] && [ "$MERGEABLE" = "MERGEABLE" ]; then
+      return 0
+    fi
+    FAILED_CHECKS="$(failed_checks)"
+    if [ -n "$FAILED_CHECKS" ]; then
+      print_failed_checks_and_exit "$FAILED_CHECKS"
+    fi
+    if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$STATE" = "DIRTY" ] || [ "$STATE" = "BEHIND" ] || [ "$STATE" = "CONFLICTING" ]; then
+      echo "ERROR: PR #$PR_NUMBER is $STATE — has conflicts or is out of date with base." >&2
+      echo "       Final merge state: mergeStateStatus=$STATE mergeable=$MERGEABLE." >&2
+      echo "       Rebase or resolve conflicts on the PR branch before merging." >&2
+      TOUCHSTONE_MERGE_FAILURE_REASON="not-mergeable"
+      exit 1
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      sleep_seconds="${MERGE_STATE_RETRY_DELAYS[$((attempt - 1))]:-30}"
+      # Tests may set MERGE_PR_SLEEP_OVERRIDE=0 to exercise retry behavior
+      # without waiting for the production backoff schedule.
+      if [ -n "${MERGE_PR_SLEEP_OVERRIDE+x}" ]; then
+        sleep_seconds="$MERGE_PR_SLEEP_OVERRIDE"
+      fi
+      sleep "$sleep_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "ERROR: PR #$PR_NUMBER is not cleanly mergeable (state=$STATE mergeable=$MERGEABLE)." >&2
+  echo "       Required checks may still be pending; waited $max_attempts merge-state attempts." >&2
+  echo "       Inspect manually: gh pr view $PR_NUMBER --web" >&2
+  TOUCHSTONE_MERGE_FAILURE_REASON="not-mergeable"
+  exit 1
+}
+
+wait_for_pr_head() {
+  local expected_head="$1"
+  local actual_head sleep_seconds
+
+  for attempt in 1 2 3 4 5; do
+    actual_head="$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")"
+    if [ "$actual_head" = "$expected_head" ]; then
+      return 0
+    fi
+    echo "    waiting for PR head update (attempt $attempt): ${actual_head:-unknown}"
+    if [ "$attempt" -lt 5 ]; then
+      sleep_seconds="${MERGE_PR_SLEEP_OVERRIDE:-2}"
+      sleep "$sleep_seconds"
+    fi
+  done
+
+  echo "ERROR: PR #$PR_NUMBER head did not update to reviewed commit $expected_head." >&2
+  echo "       Last observed head: ${actual_head:-unknown}" >&2
+  TOUCHSTONE_MERGE_FAILURE_REASON="head-not-updated"
+  exit 1
+}
+
 run_preflight_gate() {
   local base_ref="$1"
+  local label="${2:-before merge review}"
+  local event_mode="${3:-merge}"
+  local head_sha cache_key_short
 
   if ! truthy "$PREFLIGHT_REQUIRED"; then
     echo "==> Preflight disabled by [review].preflight_required=false."
@@ -553,22 +1044,40 @@ run_preflight_gate() {
     return 0
   fi
 
-  echo "==> Running deterministic preflight before merge review (diff vs $base_ref) ..."
-  touchstone_emit_event preflight_started pr_number="$PR_NUMBER" mode=merge
+  head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  if preflight_cache_prepare "$base_ref" "$event_mode" && preflight_cache_hit; then
+    cache_key_short="$(preflight_cache_short_key)"
+    echo "==> Deterministic preflight clean (cached=true, key=$cache_key_short; $label, diff vs $base_ref)."
+    touchstone_emit_event preflight_clean pr_number="$PR_NUMBER" head_sha="$head_sha" cached=true cache_key="$PREFLIGHT_CACHE_KEY"
+    return 0
+  fi
+
+  echo "==> Running deterministic preflight $label (diff vs $base_ref) ..."
+  touchstone_emit_event preflight_started pr_number="$PR_NUMBER" mode="$event_mode" cached=false
   if touchstone_preflight_main_sanitized --diff "$base_ref" "$(git rev-parse --show-toplevel)"; then
-    touchstone_emit_event preflight_clean pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
+    head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    write_preflight_clean_cache
+    if [ -n "$PREFLIGHT_CACHE_KEY" ]; then
+      cache_key_short="$(preflight_cache_short_key)"
+      echo "==> Deterministic preflight clean (cached=false, key=$cache_key_short)."
+      touchstone_emit_event preflight_clean pr_number="$PR_NUMBER" head_sha="$head_sha" cached=false cache_key="$PREFLIGHT_CACHE_KEY"
+    else
+      echo "==> Deterministic preflight clean (cached=false)."
+      touchstone_emit_event preflight_clean pr_number="$PR_NUMBER" head_sha="$head_sha" cached=false
+    fi
     return 0
   fi
 
   echo "ERROR: Deterministic preflight failed; refusing to spend provider tokens on review." >&2
   echo "       Fix the preflight failure or set TOUCHSTONE_NO_PREFLIGHT=1 for an emergency bypass." >&2
-  touchstone_emit_event preflight_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
+  head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  touchstone_emit_event preflight_blocked pr_number="$PR_NUMBER" head_sha="$head_sha"
   TOUCHSTONE_MERGE_FAILURE_REASON="preflight-blocked"
   return 1
 }
 
 run_merge_review() {
-  local current_branch default_base_ref local_head pr_head_branch pr_head_oid
+  local current_branch current_worktree default_base_ref default_worktree local_head pr_head_branch pr_head_oid
 
   if ! pr_head_branch="$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName' 2>/dev/null)"; then
     echo "ERROR: Failed to resolve PR #$PR_NUMBER head branch." >&2
@@ -589,6 +1098,16 @@ run_merge_review() {
 
   PR_HEAD_BRANCH="$pr_head_branch"
   REVIEWED_HEAD_OID="$pr_head_oid"
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  if [ "$current_branch" = "$PR_HEAD_BRANCH" ]; then
+    current_worktree="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+    default_worktree="$(worktree_path_for_branch "$DEFAULT_BRANCH" | head -n 1)"
+    if [ -n "$current_worktree" ] && [ -n "$default_worktree" ] && [ "$current_worktree" != "$default_worktree" ]; then
+      PR_WORKTREE_PATH="$current_worktree"
+    fi
+  else
+    PR_WORKTREE_PATH="$(worktree_path_for_branch "$PR_HEAD_BRANCH" | head -n 1)"
+  fi
   default_base_ref="origin/$DEFAULT_BRANCH"
 
   if [ "$BYPASS_REVIEW" = true ]; then
@@ -699,23 +1218,26 @@ run_merge_review() {
     exit 1
   fi
 
-  run_preflight_gate "$default_base_ref" || return $?
+  run_preflight_gate "$default_base_ref" "before merge review" "merge" || return $?
 
   echo "==> Running merge review ..."
   local review_rc=0
   local review_output_file
+  local review_infra_failure
+  local reviewed_head_after
   review_output_file="$(mktemp -t touchstone-merge-review.XXXXXX.txt)"
   REVIEW_SUMMARY_FILE="$(git rev-parse --git-path "touchstone/review-summary-pr-${PR_NUMBER}.json" 2>/dev/null || echo "")"
   if [ -n "$REVIEW_SUMMARY_FILE" ]; then
     mkdir -p "$(dirname "$REVIEW_SUMMARY_FILE")" 2>/dev/null || true
     rm -f "$REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
-  touchstone_emit_event review_started pr_number="$PR_NUMBER" mode=review-only
+  touchstone_emit_event review_started pr_number="$PR_NUMBER" mode=fix
   set +e
   CODEX_REVIEW_BASE="$default_base_ref" \
     CODEX_REVIEW_BRANCH_NAME="$pr_head_branch" \
+    CODEX_REVIEW_PR_NUMBER="$PR_NUMBER" \
     CODEX_REVIEW_FORCE=1 \
-    CODEX_REVIEW_MODE=review-only \
+    CODEX_REVIEW_MODE=fix \
     CODEX_REVIEW_ON_ERROR=fail-closed \
     TOUCHSTONE_PREFLIGHT_ALREADY_RAN=1 \
     CODEX_REVIEW_SUMMARY_FILE="$REVIEW_SUMMARY_FILE" \
@@ -725,14 +1247,44 @@ run_merge_review() {
 
   if [ "$review_rc" -eq 0 ]; then
     rm -f "$review_output_file"
-    touchstone_emit_event review_clean pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
+    reviewed_head_after="$(git rev-parse HEAD 2>/dev/null || echo "")"
+    if [ -z "$reviewed_head_after" ]; then
+      echo "ERROR: Could not resolve reviewed HEAD after merge review." >&2
+      TOUCHSTONE_MERGE_FAILURE_REASON="missing-reviewed-head"
+      return 1
+    fi
+    REVIEWED_HEAD_OID="$reviewed_head_after"
+    if [ "$reviewed_head_after" != "$pr_head_oid" ]; then
+      echo "==> Merge review changed HEAD:"
+      echo "    before: $pr_head_oid"
+      echo "    after:  $reviewed_head_after"
+      echo "==> Running deterministic postflight after review fixes ..."
+      run_preflight_gate "$default_base_ref" "after review fixes" "post-review" || return $?
+      echo "==> Pushing review fix commit(s) to PR branch $pr_head_branch ..."
+      if ! git push origin "HEAD:refs/heads/$pr_head_branch"; then
+        echo "ERROR: Failed to push review fix commit(s) to PR branch $pr_head_branch." >&2
+        TOUCHSTONE_MERGE_FAILURE_REASON="push-review-fixes"
+        return 1
+      fi
+      wait_for_pr_head "$reviewed_head_after"
+      wait_for_clean_merge_state
+    fi
+    touchstone_emit_event review_clean pr_number="$PR_NUMBER" head_sha="$reviewed_head_after"
     return 0
   fi
 
   echo "" >&2
   echo "ERROR: Merge review exited $review_rc; merge-gate review fails closed." >&2
-  echo "       Fix review findings or rerun after reviewer infrastructure recovers." >&2
+  review_infra_failure=false
+  if review_failure_is_infra "$review_rc" "$review_output_file"; then
+    review_infra_failure=true
+    echo "       No concrete review findings were reported; this is a provider/infrastructure outage path." >&2
+    print_review_infra_retry_guidance
+  else
+    echo "       Concrete review findings were reported; fix the findings, then rerun the merge gate." >&2
+  fi
   echo "       Emergency bypass requires an explicit --bypass-with-disclosure reason and a matching prior clean review marker." >&2
+  post_review_failure_comment "$review_output_file" "$review_infra_failure"
 
   rm -f "$review_output_file"
   touchstone_emit_event review_blocked pr_number="$PR_NUMBER" head_sha="$pr_head_oid"
@@ -755,48 +1307,7 @@ if [ "$PR_STATE" != "OPEN" ]; then
 fi
 
 # 2. Check mergeability with retries (GitHub's status can lag after a push).
-echo "==> Checking merge state for PR #$PR_NUMBER ..."
-STATE=""
-MERGEABLE=""
-MERGE_STATE_RETRY_DELAYS=(1 2 5 10 30 30 30 30 30)
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  MERGE_STATE="$(gh pr view "$PR_NUMBER" --json mergeStateStatus,mergeable --template '{{.mergeStateStatus}} {{.mergeable}}' 2>/dev/null || echo '')"
-  STATE="${MERGE_STATE%% *}"
-  MERGEABLE="${MERGE_STATE#* }"
-  [ -n "$STATE" ] || STATE="UNKNOWN"
-  [ -n "$MERGEABLE" ] || MERGEABLE="UNKNOWN"
-  echo "    attempt $attempt: mergeStateStatus=$STATE mergeable=$MERGEABLE"
-  if [ "$STATE" = "CLEAN" ] && [ "$MERGEABLE" = "MERGEABLE" ]; then
-    break
-  fi
-  FAILED_CHECKS="$(failed_checks)"
-  if [ -n "$FAILED_CHECKS" ]; then
-    print_failed_checks_and_exit "$FAILED_CHECKS"
-  fi
-  if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$STATE" = "DIRTY" ] || [ "$STATE" = "BEHIND" ] || [ "$STATE" = "CONFLICTING" ]; then
-    echo "ERROR: PR #$PR_NUMBER is $STATE — has conflicts or is out of date with base." >&2
-    echo "       Final merge state: mergeStateStatus=$STATE mergeable=$MERGEABLE." >&2
-    echo "       Rebase or resolve conflicts on the PR branch before merging." >&2
-    TOUCHSTONE_MERGE_FAILURE_REASON="not-mergeable"
-    exit 1
-  fi
-  if [ "$attempt" -lt 10 ]; then
-    sleep_seconds="${MERGE_STATE_RETRY_DELAYS[$((attempt - 1))]}"
-    # Tests may set MERGE_PR_SLEEP_OVERRIDE=0 to exercise retry behavior
-    # without waiting for the production backoff schedule.
-    if [ -n "${MERGE_PR_SLEEP_OVERRIDE+x}" ]; then
-      sleep_seconds="$MERGE_PR_SLEEP_OVERRIDE"
-    fi
-    sleep "$sleep_seconds"
-  fi
-done
-
-if [ "$STATE" != "CLEAN" ] || [ "$MERGEABLE" != "MERGEABLE" ]; then
-  echo "ERROR: PR #$PR_NUMBER is not cleanly mergeable (state=$STATE mergeable=$MERGEABLE)." >&2
-  echo "       Inspect manually: gh pr view $PR_NUMBER --web" >&2
-  TOUCHSTONE_MERGE_FAILURE_REASON="not-mergeable"
-  exit 1
-fi
+wait_for_clean_merge_state
 
 # 3. Run AI review as the merge gate.
 run_merge_review
@@ -878,5 +1389,6 @@ if [ -n "$CORTEX_HOOK_SCRIPT" ]; then
 fi
 
 cleanup_local_pr_branch_after_merge
+cleanup_pr_worktree_after_merge
 
 echo "==> Done."
