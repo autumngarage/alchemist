@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from alchemist.briefs import BRIEF_TEMPLATE_VERSION, render_brief, render_pr_body
 from alchemist.doctor import run_doctor
@@ -1540,7 +1540,14 @@ def _find_pr_for_head(repo: str, branch: str) -> tuple[str, int] | None:
     return url, number
 
 
-def _pr_state_for_head(repo: str, branch: str) -> dict[str, str | int | None] | None:
+class _PrHeadState(TypedDict):
+    url: str
+    number: int
+    state: str
+    mergedAt: str | None
+
+
+def _pr_state_for_head(repo: str, branch: str) -> _PrHeadState | None:
     cmd = [
         "gh", "pr", "list",
         "--repo", repo,
