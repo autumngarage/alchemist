@@ -73,6 +73,7 @@ class RunResult:
     error: str | None
     elapsed_sec: float
     dry_run: bool
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -384,7 +385,7 @@ def _process_locked(
     try:
         _push_branch(work_dir, branch, repo, token)
     except subprocess.SubprocessError as exc:
-        return _bail(repo, issue, started, config, f"push: {exc}")
+        return _bail(repo, issue, started, config, f"push: {exc}", branch=branch)
 
     body = render_pr_body(
         issue=issue,
@@ -395,7 +396,7 @@ def _process_locked(
     try:
         pr_url, pr_number = _make_pr(repo, default_branch, branch, pr_title, body)
     except _GhError as exc:
-        return _bail(repo, issue, started, config, f"pr-create: {exc}")
+        return _bail(repo, issue, started, config, f"pr-create: {exc}", branch=branch)
 
     # Touchstone owns the review-and-merge gate. Alchemist hands off the PR
     # number and waits for the result. CLEAN review → squash-merged. BLOCKED
@@ -462,6 +463,10 @@ class _ToolError(RuntimeError):
 
 
 class _SanitizedSubprocessError(subprocess.SubprocessError):
+    pass
+
+
+class _SanitizedSubprocessTimeoutError(_SanitizedSubprocessError):
     pass
 
 
@@ -851,7 +856,7 @@ def _sanitize_error_text(text: str, *, token: str | None = None) -> str:
 
 def _run_git_auth(
     cmd: list[str], *, cwd: Path | None = None, token: str, timeout: int
-) -> None:
+) -> subprocess.CompletedProcess[str]:
     """Run an authenticated git command without leaking auth in exceptions."""
     try:
         result = subprocess.run(  # noqa: S603,S607
@@ -862,14 +867,19 @@ def _run_git_auth(
             timeout=timeout,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
         raise _SanitizedSubprocessError(
+            _sanitize_error_text(str(exc), token=token)
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _SanitizedSubprocessTimeoutError(
             _sanitize_error_text(str(exc), token=token)
         ) from exc
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"git exit {result.returncode}"
         raise _SanitizedSubprocessError(_sanitize_error_text(detail, token=token))
+    return result
 
 
 def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> None:
@@ -1439,6 +1449,41 @@ def _check_pr_merged(repo: str, pr_number: int) -> bool:
     return bool(output) and output not in ("null", "")
 
 
+def _find_pr_for_head(repo: str, branch: str) -> tuple[str, int] | None:
+    cmd = [
+        "gh", "pr", "list",
+        "--repo", repo,
+        "--head", branch,
+        "--state", "all",
+        "--json", "url,number,state",
+        "--limit", "1",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+
+    first = payload[0]
+    if not isinstance(first, dict):
+        return None
+    url = first.get("url")
+    number = first.get("number")
+    if not isinstance(url, str) or not isinstance(number, int):
+        return None
+    return url, number
+
+
 def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
     # Use 'origin' (set to a plain URL by _clone_or_update) plus the auth
     # header — never embed the token in the URL. See _git_auth_prefix.
@@ -1458,10 +1503,26 @@ def _push_branch(repo_dir: Path, branch: str, repo: str, token: str) -> None:
         if remote_oid
         else []
     )
-    _run_git_auth(
-        [*git_auth, "push", "--set-upstream", *force_option, "origin", branch],
-        cwd=repo_dir, token=token, timeout=120,
-    )
+    push_cmd = [*git_auth, "push", "--set-upstream", *force_option, "origin", branch]
+    try:
+        _run_git_auth(push_cmd, cwd=repo_dir, token=token, timeout=120)
+        return
+    except _SanitizedSubprocessTimeoutError as exc:
+        original_error = exc
+
+    local_sha = _local_head_sha(repo_dir)
+    remote_sha = _remote_branch_sha(repo_dir, branch, token)
+    if local_sha and remote_sha == local_sha:
+        print(
+            f"alchemist: push timeout reconciled for {branch}; remote already at {local_sha}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        _run_git_auth(push_cmd, cwd=repo_dir, token=token, timeout=120)
+    except subprocess.SubprocessError as exc:
+        raise original_error from exc
 
 
 def _refresh_remote_branch_ref(repo_dir: Path, branch: str, token: str) -> None:
@@ -1508,6 +1569,50 @@ def _remote_branch_oid(repo_dir: Path, branch: str) -> str | None:
     return oid or None
 
 
+def _remote_branch_sha(repo_dir: Path, branch: str, token: str) -> str | None:
+    git_auth = _git_auth_prefix(token)
+    try:
+        result = _run_git_auth(
+            [*git_auth, "ls-remote", "origin", f"refs/heads/{branch}"],
+            cwd=repo_dir,
+            token=token,
+            timeout=10,
+        )
+    except subprocess.SubprocessError:
+        return None
+
+    line = result.stdout.strip().splitlines()
+    if not line:
+        return None
+    first = line[0].strip().split()
+    if not first:
+        return None
+    sha = first[0]
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return sha
+    return None
+
+
+def _local_head_sha(repo_dir: Path) -> str | None:
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return sha
+    return None
+
+
 def _make_pr(
     repo: str, base: str, head: str, title: str, body: str
 ) -> tuple[str, int]:
@@ -1520,7 +1625,13 @@ def _make_pr(
         "--title", title,
         "--body", body,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
+    except subprocess.TimeoutExpired as exc:
+        reconciled = _find_pr_for_head(repo, head)
+        if reconciled is not None:
+            return reconciled
+        raise _GhError("pr-create: timeout, no PR found on reconciliation") from exc
     if result.returncode != 0:
         raise _GhError(result.stderr.strip() or f"gh pr create exit {result.returncode}")
     url = result.stdout.strip().splitlines()[-1]
@@ -1555,10 +1666,17 @@ def _post_activity_comment(
 
 
 def _post_error_comment(
-    repo: str, issue_number: int, message: str, config: Config,
+    repo: str,
+    issue_number: int,
+    message: str,
+    config: Config,
+    *,
+    branch: str | None = None,
 ) -> None:
     """Backwards-compat shim around _post_activity_comment for the bail path."""
     message = _message_with_transcript_tail(message, config)
+    if branch:
+        message = f"{message}\n\nworking branch: `{branch}`"
     _post_activity_comment(repo, issue_number, f"alchemist: {message}", config)
 
 
@@ -1624,20 +1742,35 @@ def _mark_merge_gate_error(
 
 
 def _bail(
-    repo: str, issue: DispatchIssue, started: float, config: Config, message: str
+    repo: str,
+    issue: DispatchIssue,
+    started: float,
+    config: Config,
+    message: str,
+    *,
+    branch: str | None = None,
 ) -> RunResult:
     """Common error path: post a comment, transition to error label, return result."""
     message = _sanitize_error_text(message, token=config.github_token)
     label_error: str | None = None
+    visible_branch = branch if branch and message.startswith(("push:", "pr-create:")) else None
+    if visible_branch and message.startswith("pr-create:"):
+        reconciled = _find_pr_for_head(repo, visible_branch)
+        if reconciled is not None:
+            reconciled_url, reconciled_number = reconciled
+            message = (
+                f"{message}; reconciliation: found existing PR "
+                f"{reconciled_url} (#{reconciled_number})"
+            )
     if not config.dry_run:
-        _post_error_comment(repo, issue.number, message, config)
+        _post_error_comment(repo, issue.number, message, config, branch=visible_branch)
         try:
             _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
         except _GhError as exc:
             label_error = f"label-transition: {exc}"
             print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
     error = f"{message}; {label_error}" if label_error else message
-    return _result(repo, issue.number, started, config, error=error)
+    return _result(repo, issue.number, started, config, error=error, branch=visible_branch)
 
 
 def _decline(
@@ -1692,6 +1825,7 @@ def _result(
     pr_url: str | None = None,
     merged: bool | None = None,
     error: str | None = None,
+    branch: str | None = None,
 ) -> RunResult:
     return RunResult(
         repo=repo,
@@ -1701,6 +1835,7 @@ def _result(
         error=error,
         elapsed_sec=time.monotonic() - started,
         dry_run=config.dry_run,
+        branch=branch,
     )
 
 

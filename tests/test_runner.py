@@ -72,6 +72,7 @@ def _stub_all_external(
     git_auth_failure: bool = False,
     remote_branch_exists: bool = True,
     push_create_failure: bool = False,
+    pr_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
     # "timeout-but-actually-merged" | "timeout-and-not-merged"
@@ -158,12 +159,22 @@ def _stub_all_external(
 
         if "pr" in cmd and "create" in cmd:
             captured["pr_creates"].append(cmd)
+            if pr_create_failure:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr="pr create failed",
+                )
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=0,
                 stdout="https://github.com/autumngarage/touchstone/pull/9001\n",
                 stderr="",
             )
+
+        if "pr" in cmd and "list" in cmd and "--json" in cmd and "url,number,state" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
 
         if "pr" in cmd and "view" in cmd and "--json" in cmd and "mergedAt" in cmd:
             if merge_outcome == "timeout-but-actually-merged":
@@ -854,6 +865,131 @@ def test_post_timeout_recheck_confirms_genuine_failure(
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
     # Only the working transition fired; no shipped transition because not merged.
     assert len(captured["label_transitions"]) == 1
+
+
+def test_make_pr_timeout_reconciles_existing_pr(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _make_pr
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["gh", "pr", "create"], timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "alchemist.runner._find_pr_for_head",
+        lambda repo, head: ("https://github.com/autumngarage/touchstone/pull/99", 99),
+    )
+
+    assert _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b") == (
+        "https://github.com/autumngarage/touchstone/pull/99",
+        99,
+    )
+
+
+def test_make_pr_timeout_without_reconciliation_raises_gh_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from alchemist.runner import _GhError, _make_pr
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["gh", "pr", "create"], timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("alchemist.runner._find_pr_for_head", lambda repo, head: None)
+
+    with pytest.raises(_GhError, match="timeout, no PR found on reconciliation"):
+        _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b")
+
+
+def test_push_timeout_reconciles_when_remote_matches_local(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _push_branch, _SanitizedSubprocessTimeoutError
+
+    calls = {"count": 0}
+    local_sha = "a" * 40
+
+    def fake_run_git_auth(*args, **kwargs):
+        calls["count"] += 1
+        raise _SanitizedSubprocessTimeoutError("timed out")
+
+    monkeypatch.setattr("alchemist.runner._git_auth_prefix", lambda token: ["git"])
+    monkeypatch.setattr("alchemist.runner._refresh_remote_branch_ref", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._remote_branch_oid", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._run_git_auth", fake_run_git_auth)
+    monkeypatch.setattr("alchemist.runner._local_head_sha", lambda *a, **k: local_sha)
+    monkeypatch.setattr("alchemist.runner._remote_branch_sha", lambda *a, **k: local_sha)
+
+    _push_branch(Path("."), "alchemist/issue-7", "autumngarage/touchstone", "ghp_fake")
+
+    assert calls["count"] == 1
+
+
+def test_push_timeout_retries_when_remote_differs(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _push_branch, _SanitizedSubprocessTimeoutError
+
+    calls = {"count": 0}
+
+    def fake_run_git_auth(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise _SanitizedSubprocessTimeoutError("timed out")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("alchemist.runner._git_auth_prefix", lambda token: ["git"])
+    monkeypatch.setattr("alchemist.runner._refresh_remote_branch_ref", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._remote_branch_oid", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._run_git_auth", fake_run_git_auth)
+    monkeypatch.setattr("alchemist.runner._local_head_sha", lambda *a, **k: "a" * 40)
+    monkeypatch.setattr("alchemist.runner._remote_branch_sha", lambda *a, **k: "b" * 40)
+
+    _push_branch(Path("."), "alchemist/issue-7", "autumngarage/touchstone", "ghp_fake")
+
+    assert calls["count"] == 2
+
+
+def test_push_timeout_retry_failure_reraises_original_timeout(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import (
+        _push_branch,
+        _SanitizedSubprocessError,
+        _SanitizedSubprocessTimeoutError,
+    )
+
+    calls = {"count": 0}
+    first_error = _SanitizedSubprocessTimeoutError("first timeout")
+
+    def fake_run_git_auth(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise first_error
+        raise _SanitizedSubprocessError("second failure")
+
+    monkeypatch.setattr("alchemist.runner._git_auth_prefix", lambda token: ["git"])
+    monkeypatch.setattr("alchemist.runner._refresh_remote_branch_ref", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._remote_branch_oid", lambda *a, **k: None)
+    monkeypatch.setattr("alchemist.runner._run_git_auth", fake_run_git_auth)
+    monkeypatch.setattr("alchemist.runner._local_head_sha", lambda *a, **k: "a" * 40)
+    monkeypatch.setattr("alchemist.runner._remote_branch_sha", lambda *a, **k: None)
+
+    with pytest.raises(_SanitizedSubprocessTimeoutError) as exc_info:
+        _push_branch(Path("."), "alchemist/issue-7", "autumngarage/touchstone", "ghp_fake")
+
+    assert calls["count"] == 2
+    assert exc_info.value is first_error
+
+
+def test_pr_create_failure_reports_working_branch_visibility(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, pr_create_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("pr-create:")
+    assert results[0].branch is not None
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "pr-create:" in body)
+    assert f"working branch: `{results[0].branch}`" in error_body
 
 
 # --------------------------------------------------------------------------- #
