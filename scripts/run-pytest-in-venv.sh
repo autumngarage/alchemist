@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run pytest with the project's virtualenv Python instead of system python3.
+# Run pytest with the project's virtualenv Python when available.
 #
 # Usage:
 #   bash scripts/run-pytest-in-venv.sh tests/
@@ -25,12 +25,17 @@ trim() {
 }
 
 find_python() {
-  local candidate cwd parent_root parent_python
+  local candidate cwd parent_root parent_python fallback_python
 
   if [ -n "${PYTEST_PYTHON:-}" ]; then
     if command -v "$PYTEST_PYTHON" >/dev/null 2>&1; then
-      command -v "$PYTEST_PYTHON"
-      return 0
+      candidate="$(command -v "$PYTEST_PYTHON")"
+      if is_python_312 "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      echo "ERROR: PYTEST_PYTHON must point to Python 3.12: $PYTEST_PYTHON" >&2
+      return 1
     fi
 
     echo "ERROR: PYTEST_PYTHON is set but not executable: $PYTEST_PYTHON" >&2
@@ -39,8 +44,13 @@ find_python() {
 
   for candidate in ".venv/bin/python" "agent/.venv/bin/python"; do
     if [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
+      if is_python_312 "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      echo "ERROR: project virtualenv is not Python 3.12: $candidate" >&2
+      echo "       Rebuild it with: python3.12 -m venv --clear .venv && .venv/bin/python -m pip install -e . -r requirements.txt -r requirements-test.txt" >&2
+      return 1
     fi
   done
 
@@ -48,9 +58,18 @@ find_python() {
   if parent_root="$(find_worktree_parent_root "$cwd")"; then
     parent_python="$parent_root/.venv/bin/python"
     if [ -x "$parent_python" ]; then
-      printf '%s\n' "$parent_python"
-      return 0
+      if is_python_312 "$parent_python"; then
+        printf '%s\n' "$parent_python"
+        return 0
+      fi
+      echo "ERROR: parent worktree virtualenv is not Python 3.12: $parent_python" >&2
+      return 1
     fi
+  fi
+
+  if fallback_python="$(find_python_with_pytest)"; then
+    printf '%s\n' "$fallback_python"
+    return 0
   fi
 
   echo "ERROR: no project virtualenv found." >&2
@@ -58,8 +77,34 @@ find_python() {
   if [ -n "${parent_root:-}" ]; then
     echo "       Tried: $parent_root/.venv/bin/python (worktree parent)" >&2
   fi
-  echo "       Run \`bash setup.sh\` in this checkout, OR push from the" >&2
-  echo "       parent checkout that has the venv set up." >&2
+  echo "       Tried: Python 3.12 on PATH with pytest installed" >&2
+  echo "       Run \`bash setup.sh\` in this checkout, push from the" >&2
+  echo "       parent checkout that has the venv set up, OR install test" >&2
+  echo "       dependencies into the active Python environment." >&2
+  return 1
+}
+
+is_python_312() {
+  local python_bin="$1"
+  "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1
+}
+
+find_python_with_pytest() {
+  local candidate candidate_path
+
+  for candidate in python3 python; do
+    if ! candidate_path="$(command -v "$candidate" 2>/dev/null)"; then
+      continue
+    fi
+    if ! is_python_312 "$candidate_path"; then
+      continue
+    fi
+    if "$candidate_path" -c 'import pytest' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate_path"
+      return 0
+    fi
+  done
+
   return 1
 }
 

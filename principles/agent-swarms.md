@@ -116,6 +116,18 @@ aggregate PR when the feature only makes sense as a unit, when shared files
 must be updated centrally, or when the change only makes sense reviewed as
 a whole.
 
+### Pipeline Meta-Fixes Ship First
+
+If a lane changes the review/merge pipeline itself, ship that lane before other
+parallel lanes. Pipeline fixes include `scripts/merge-pr.sh`,
+`scripts/open-pr.sh`, `scripts/conductor-review.sh`, and pre-push hooks. Every
+other lane flows through that path at review/merge time, so leaving known
+pipeline bugs in place can invalidate otherwise-correct slice PRs.
+
+Worked example (Wave 2): land pipeline PR **#214** first, then run content
+lanes **#215** and **#216** through the fixed pipeline. Do not merge #215/#216
+first and "fix the pipeline later."
+
 ## Concurrency Cap
 
 Parallel work has real coordination cost.

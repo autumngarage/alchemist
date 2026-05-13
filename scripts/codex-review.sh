@@ -1,30 +1,38 @@
 #!/usr/bin/env bash
 #
-# hooks/codex-review.sh — non-interactive AI code review + auto-fix loop.
+# hooks/codex-review.sh — legacy-compatible Conductor review + auto-fix loop.
+#
+# Preferred human-facing entry points are hooks/conductor-review.sh,
+# scripts/conductor-review.sh, and `touchstone review`. This file keeps the
+# historical codex-review protocol names working for existing projects.
 #
 # Touchstone 2.0+: the single reviewer is `conductor` (autumn-garage/conductor).
 # Conductor owns per-provider model selection, auth, permission translation,
-# route logging, and cost reporting. This hook declares *what it needs* (review
-# mode → tools) and lets Conductor's router pick *how* to run it.
+# route logging, and cost reporting. This hook uses Conductor's semantic review
+# interface for read-only review, then asks for edit-capable execution only when
+# fix mode has review findings to address.
 # Wired into merge-pr.sh and default-branch pre-push checks.
 #
 # Loop:
-#   1. Run Conductor against the local diff vs the default branch
+#   1. Run Conductor read-only review against the local diff vs the default branch
 #   2. If it says CODEX_REVIEW_CLEAN → push allowed.
-#   3. If it says CODEX_REVIEW_FIXED → it edited files. Stage + commit the
+#   3. If it says CODEX_REVIEW_BLOCKED and mode allows edits → run one
+#      edit-capable fix pass for safe findings.
+#   4. If it says CODEX_REVIEW_FIXED → it edited files. Stage + commit the
 #      fixes (a new commit, NOT an amend) and loop back to step 1.
-#   4. If it says CODEX_REVIEW_BLOCKED → push aborts, findings printed.
-#   5. After max_iterations rounds without converging, push aborts.
+#   5. If it says CODEX_REVIEW_BLOCKED → push aborts, findings printed.
+#   6. After max_iterations rounds without converging, push aborts.
 #
 # Reviewer selection:
 #   2.0 uses a single adapter (`reviewer_conductor_*`) — see the
 #   `reviewer_conductor_exec` block below. Legacy 1.x configs that set
 #   `[review].reviewers = ["codex", "claude", ...]` are auto-detected at
 #   startup and a one-time migration hint is printed; the values are
-#   translated to Conductor's auto-router.
+#   translated to Conductor provider pins.
 #
 # Configuration:
-#   Place a .codex-review.toml at the repo root. Key knobs:
+#   Place .touchstone-review.toml at the repo root. Legacy .codex-review.toml
+#   is still read when the Touchstone-named config is absent. Key knobs:
 #     [review].reviewer         = "conductor"  (only valid 2.0 value)
 #     [review.conductor].prefer = best|cheapest|fastest|balanced
 #     [review.conductor].effort = minimal|low|medium|high|max
@@ -32,22 +40,23 @@
 #     [review.conductor].with   = "<provider>"  (pins a specific provider)
 #     [review.conductor].exclude = "<p1>,<p2>"  (skips in auto-routing)
 #     [review.context].mode     = "auto"|"full"  (auto prunes simple diffs)
-#   See hooks/codex-review.config.example.toml for the full spec.
+#   See hooks/conductor-review.config.example.toml for the full spec.
 #
-#   If no .codex-review.toml exists, ALL paths are treated as unsafe
+#   If no review config exists, ALL paths are treated as unsafe
 #   (no auto-fix). This is the conservative default — opt in to auto-fix
 #   explicitly by listing safe paths or setting safe_by_default = true.
 #
 # Modes:
-#   review-only — read + run commands, no file edits or commits
+#   review-only — Conductor semantic code review, no file edits or commits
 #   fix         — full access: read, run commands, edit files, commit fixes
 #   diff-only   — read-only: diff embedded in the prompt, no tool use
 #   no-tests    — edit + commit, no command execution (skip test runs)
 #
-#   Modes are declared at the Conductor boundary: Touchstone translates mode
-#   → tools and passes those; Conductor maps the tool list to each provider's
-#   native permission/sandbox contract. Set via CODEX_REVIEW_MODE env var or
-#   `mode` in .codex-review.toml.
+#   Modes are declared at the Conductor boundary: Touchstone translates
+#   read-only review to `conductor review --base ... --brief-file -`;
+#   edit-capable phases pass tool sets and Conductor maps them to each
+#   provider's native contract. Set via CODEX_REVIEW_MODE env var or `mode`
+#   in .touchstone-review.toml.
 #
 # Env overrides:
 #   TOUCHSTONE_REVIEWER               — DEPRECATED in 2.0.0; auto-translates to TOUCHSTONE_CONDUCTOR_WITH=<provider>
@@ -56,6 +65,7 @@
 #   TOUCHSTONE_CONDUCTOR_EFFORT       — minimal|low|medium|high|max (default: size-aware)
 #   TOUCHSTONE_CONDUCTOR_TAGS         — comma-separated tag hints (default: code-review)
 #   TOUCHSTONE_CONDUCTOR_EXCLUDE      — comma-separated providers to skip
+#   TOUCHSTONE_CONDUCTOR_FALLBACK_RETRY — true/false; retry infra/sentinel failures through auto-routing once
 #   CODEX_REVIEW_SUPPRESS_LEGACY_WARNINGS — silence one-time migration hints
 #   CODEX_REVIEW_ENABLED              — true/false override for the [review].enabled setting
 #   CODEX_REVIEW_MODE                 — review-only|fix|diff-only|no-tests (default: fix)
@@ -229,7 +239,20 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOUCHSTONE_ROOT="${TOUCHSTONE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-CONFIG_FILE="$REPO_ROOT/.codex-review.toml"
+
+resolve_review_config_file() {
+  local repo_root="$1"
+  if [ -f "$repo_root/.touchstone-review.toml" ]; then
+    printf '%s\n' "$repo_root/.touchstone-review.toml"
+  elif [ -f "$repo_root/.codex-review.toml" ]; then
+    printf '%s\n' "$repo_root/.codex-review.toml"
+  else
+    printf '%s\n' "$repo_root/.touchstone-review.toml"
+  fi
+}
+
+CONFIG_FILE="$(resolve_review_config_file "$REPO_ROOT")"
+CONFIG_DISPLAY_NAME="$(basename "$CONFIG_FILE")"
 cd "$REPO_ROOT"
 
 PREFLIGHT_SCRIPT="$TOUCHSTONE_ROOT/lib/preflight.sh"
@@ -257,7 +280,7 @@ fi
 #   conductor-error            reviewer crashed or returned non-zero (legacy catch-all)
 #   network-error              (reserved — Conductor reports this via exit code)
 #   config-parse-error         (reserved — TOML parser is permissive today)
-#   config-disabled            [review].enabled=false in .codex-review.toml
+#   config-disabled            [review].enabled=false in the review config
 #   review-disabled-by-user    CODEX_REVIEW_ENABLED=false at the env layer
 #   force-skip                 (reserved — no env var skips today; future use)
 #   dry-run                    (reserved — bin/touchstone review --dry-run path)
@@ -273,7 +296,7 @@ fi
 # Fail-open events are always visible: a stderr line formatted as
 #   [fail-open:<CODE>] <reason> — AI review bypassed, push proceeds
 # is emitted for each event so the absent safety boundary is never silent.
-# Set on_error="fail-closed" in .codex-review.toml to make these fatal.
+# Set on_error="fail-closed" in the review config to make these fatal.
 
 # `${VAR-default}` (single dash) substitutes the default ONLY when VAR is
 # unset, NOT when it is an empty string. This preserves the documented
@@ -370,6 +393,10 @@ PREFLIGHT_REQUIRED=true
 REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-0}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
+HIGH_SCRUTINY_PATHS=""
+HIGH_SCRUTINY_MODE="peer"
+HIGH_SCRUTINY_TRIGGERED=false
+HIGH_SCRUTINY_REASON=""
 REVIEWER_CASCADE=()
 # Legacy local-reviewer env vars — no longer drive behavior in 2.0+, but
 # we still declare them so users with these set in their shell don't get
@@ -413,13 +440,17 @@ PROMPT_CONTEXT_FULL_PATHS=""
 PROMPT_CONTEXT_ARCHITECTURAL_PATHS="AGENTS.md
 CLAUDE.md
 GEMINI.md
+.touchstone-review.toml
 .codex-review.toml
 .codex-review-context.md
 .github/codex-review-context.md
 .github/workflows/
 bootstrap/
+hooks/conductor-review.sh
+hooks/conductor-review.config.example.toml
 hooks/codex-review.sh
 hooks/codex-review.config.example.toml
+scripts/conductor-review.sh
 scripts/codex-review.sh
 architecture/
 docs/architecture/
@@ -541,6 +572,46 @@ append_unsafe_paths_csv() {
   IFS=',' read -r -a items <<<"$csv"
   for item in "${items[@]}"; do
     append_unsafe_path "$item"
+  done
+}
+
+append_high_scrutiny_path() {
+  local value="$1"
+  value="$(trim "$value")"
+  value="${value%,}"
+  value="$(trim "$value")"
+
+  case "$value" in
+    \"*\")
+      value="${value#\"}"
+      value="${value%\"}"
+      ;;
+    \'*\')
+      value="${value#\'}"
+      value="${value%\'}"
+      ;;
+  esac
+
+  [ -z "$value" ] && return
+
+  if [ -n "$HIGH_SCRUTINY_PATHS" ]; then
+    HIGH_SCRUTINY_PATHS="${HIGH_SCRUTINY_PATHS}
+$value"
+  else
+    HIGH_SCRUTINY_PATHS="$value"
+  fi
+}
+
+append_high_scrutiny_paths_csv() {
+  local csv="$1"
+  local item
+  local -a items=()
+
+  [ -n "$csv" ] || return 0
+
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    append_high_scrutiny_path "$item"
   done
 }
 
@@ -716,6 +787,38 @@ normalize_bool() {
   esac
 }
 
+normalize_conductor_review_tags() {
+  printf '%s\n' "${1:-code-review}" \
+    | awk -F',' '
+      {
+        for (i = 1; i <= NF; i++) {
+          tag = $i
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", tag)
+          if (tag == "" || tag == "tool-use") {
+            continue
+          }
+          if (!(tag in seen)) {
+            seen[tag] = 1
+            order[++count] = tag
+          }
+        }
+      }
+      END {
+        out = ""
+        if (!("code-review" in seen)) {
+          out = "code-review"
+        }
+        for (i = 1; i <= count; i++) {
+          if (out != "") {
+            out = out ","
+          }
+          out = out order[i]
+        }
+        print out
+      }
+    '
+}
+
 toml_string_value() {
   local value="$1"
   value="$(trim "$value")"
@@ -739,7 +842,7 @@ is_truthy() {
   esac
 }
 
-# Parse .codex-review.toml if it exists.
+# Parse the review config if it exists.
 # We do minimal TOML parsing in bash — just key = value pairs and string arrays.
 if [ -f "$CONFIG_FILE" ]; then
   # Source the TOML library
@@ -829,6 +932,14 @@ if [ -f "$CONFIG_FILE" ]; then
         case "$key" in
           enabled) REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-$(normalize_bool "$value")}" ;;
           preflight_required) PREFLIGHT_REQUIRED="$(normalize_bool "$value")" ;;
+          high_scrutiny_mode) HIGH_SCRUTINY_MODE="$(toml_unquote "$value")" ;;
+          high_scrutiny_paths | high_scrutiny_patterns)
+            if [[ "$value" == "["* ]]; then
+              append_high_scrutiny_paths_csv "$(toml_normalize_array "$value")"
+            else
+              append_high_scrutiny_paths_csv "$value"
+            fi
+            ;;
           reviewers)
             if [[ "$value" == "["* ]]; then
               append_reviewers_csv "$(toml_normalize_array "$value")"
@@ -855,7 +966,7 @@ if [ -f "$CONFIG_FILE" ]; then
           max_iterations) MAX_ITERATIONS="${CODEX_REVIEW_MAX_ITERATIONS:-$value}" ;;
           max_diff_lines) MAX_DIFF_LINES="${CODEX_REVIEW_MAX_DIFF_LINES:-$value}" ;;
           cache_clean_reviews) CACHE_CLEAN_REVIEWS="${CODEX_REVIEW_CACHE_CLEAN:-$(normalize_bool "$value")}" ;;
-          safe_by_default) SAFE_BY_DEFAULT="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')" ;;
+          safe_by_default) SAFE_BY_DEFAULT="$(normalize_bool "$value")" ;;
           mode) CONFIG_MODE="$(toml_unquote "$value")" ;;
           timeout) REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-$value}" ;;
           on_error) ON_ERROR="${CODEX_REVIEW_ON_ERROR:-$(toml_unquote "$value")}" ;;
@@ -909,7 +1020,7 @@ if [ "${#REVIEWER_CASCADE[@]}" -gt 0 ]; then
     echo "        [review.conductor]" >&2
     echo "          prefer = \"best\"" >&2
     echo "          effort = \"high\"" >&2
-    echo "    Update .codex-review.toml at your convenience. See CHANGELOG for details." >&2
+    echo "    Update ${CONFIG_DISPLAY_NAME:-.touchstone-review.toml} at your convenience. See CHANGELOG for details." >&2
   fi
 fi
 
@@ -936,18 +1047,18 @@ if [ -n "${TOUCHSTONE_REVIEWER:-}" ]; then
     local)
       # Touchstone 2.0 retired the `local` reviewer; Conductor has no
       # provider by that name, so a raw translation (`--with local`) would
-      # fail with "unknown provider". The closest 2.0 analog is ollama.
-      # Warn and offer the migration; don't silently pin to something that
-      # crashes at call-time.
+      # fail with "unknown provider". The explicit offline/local analog is
+      # ollama. Warn and offer the migration; don't silently pin to something
+      # that crashes at call-time.
       echo "==> NOTE: TOUCHSTONE_REVIEWER=local is deprecated in 2.0.0." >&2
       echo "    The 1.x 'local' reviewer is retired; Conductor has no provider by that name." >&2
-      echo "    Migrating to: TOUCHSTONE_CONDUCTOR_WITH=ollama (the closest 2.0 analog)." >&2
+      echo "    Migrating to explicit offline review: TOUCHSTONE_CONDUCTOR_WITH=ollama." >&2
       echo "    If you had a custom local command, register it as a Conductor custom" >&2
       echo "    provider when v0.3 ships: conductor providers add --name local --shell '<cmd>'" >&2
       # TOUCHSTONE_REVIEWER is env-scoped, so it trumps the TOML `with=` pin.
       CONDUCTOR_WITH="ollama"
       ;;
-    codex | claude | gemini)
+    openrouter | codex | claude | gemini)
       echo "==> NOTE: TOUCHSTONE_REVIEWER=$TOUCHSTONE_REVIEWER is deprecated in 2.0.0." >&2
       echo "    Pin an underlying provider with: TOUCHSTONE_CONDUCTOR_WITH=$TOUCHSTONE_REVIEWER" >&2
       CONDUCTOR_WITH="$TOUCHSTONE_REVIEWER"
@@ -961,11 +1072,12 @@ if [ -n "${TOUCHSTONE_REVIEWER:-}" ]; then
   REVIEWER_CASCADE=("conductor")
 fi
 
-# Env overrides for the conductor adapter (take precedence over .codex-review.toml).
+# Env overrides for the conductor adapter (take precedence over the review config).
 CONDUCTOR_WITH="${TOUCHSTONE_CONDUCTOR_WITH:-${CONDUCTOR_WITH:-}}"
 CONDUCTOR_PREFER="${TOUCHSTONE_CONDUCTOR_PREFER:-${CONDUCTOR_PREFER:-best}}"
 CONDUCTOR_EFFORT="${TOUCHSTONE_CONDUCTOR_EFFORT:-${CONDUCTOR_EFFORT:-high}}"
 CONDUCTOR_TAGS="${TOUCHSTONE_CONDUCTOR_TAGS:-${CONDUCTOR_TAGS:-code-review}}"
+CONDUCTOR_FALLBACK_RETRY="${TOUCHSTONE_CONDUCTOR_FALLBACK_RETRY:-true}"
 if [ -n "${TOUCHSTONE_CONDUCTOR_EXCLUDE+x}" ]; then
   CONDUCTOR_EXCLUDE="$TOUCHSTONE_CONDUCTOR_EXCLUDE"
 elif [ "$CONDUCTOR_EXCLUDE_CONFIGURED" = true ]; then
@@ -978,8 +1090,8 @@ fi
 # Mode resolution
 # --------------------------------------------------------------------------
 # Modes: review-only, fix, diff-only, no-tests
-#   review-only — read + bash, no edits, no git ops (default for merge review)
-#   fix         — full access, auto-fix + commit (default for pre-push)
+#   review-only — semantic read-only review, no edits, no git ops
+#   fix         — full access, auto-fix + commit (default)
 #   diff-only   — read-only, no bash, no edits
 #   no-tests    — edit + commit, no bash (skip test execution)
 
@@ -1005,8 +1117,20 @@ resolve_mode() {
 }
 
 REVIEW_MODE="$(resolve_mode)"
+SCOPED_LARGE_DIFF_REVIEW=false
+SCOPED_LARGE_DIFF_SYNC_ONLY=false
+SCOPED_LARGE_DIFF_ORIGINAL_LINES=""
+SCOPED_LARGE_DIFF_LINES=""
+SCOPED_LARGE_DIFF_INCLUDED_COUNT=0
+SCOPED_LARGE_DIFF_EXCLUDED_COUNT=0
+SCOPED_LARGE_DIFF_FILE=""
+SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE=""
+SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE=""
 
-mode_allows_fix() { [ "$REVIEW_MODE" = "fix" ] || [ "$REVIEW_MODE" = "no-tests" ]; }
+mode_allows_fix() {
+  is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}" && return 1
+  [ "$REVIEW_MODE" = "fix" ] || [ "$REVIEW_MODE" = "no-tests" ]
+}
 mode_allows_bash() { [ "$REVIEW_MODE" = "fix" ] || [ "$REVIEW_MODE" = "review-only" ]; }
 
 short_ref_name() {
@@ -1114,6 +1238,12 @@ find_full_context_reason() {
     return 0
   fi
 
+  match="$(find_path_matching_context_patterns "$changed_paths" "$HIGH_SCRUTINY_PATHS" || true)"
+  if [ -n "$match" ]; then
+    printf 'configured high-scrutiny path %s' "$match"
+    return 0
+  fi
+
   match="$(find_path_matching_context_patterns "$changed_paths" "$PROMPT_CONTEXT_FULL_PATHS" || true)"
   if [ -n "$match" ]; then
     printf 'configured full-context path %s' "$match"
@@ -1184,6 +1314,22 @@ select_prompt_context_mode() {
 }
 
 build_prompt_context_instructions() {
+  if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+    cat <<CONTEXT_EOF
+## Project context mode
+
+Large-diff scoped review boundary:
+- Total branch diff: $SCOPED_LARGE_DIFF_ORIGINAL_LINES lines (> $MAX_DIFF_LINES cap).
+- Scoped project-owned diff: $SCOPED_LARGE_DIFF_LINES lines across $SCOPED_LARGE_DIFF_INCLUDED_COUNT file(s).
+- Excluded paths: $SCOPED_LARGE_DIFF_EXCLUDED_COUNT trusted Touchstone-managed file(s) that appeared in both base and HEAD .touchstone-manifest.
+- .touchstone-manifest and mixed-ownership steering/config files are never excluded.
+
+Review only the embedded scoped diff below. Do not inspect or reason about excluded managed paths unless they are shown in the scoped diff.
+Do not edit files. Do not stage, commit, or modify anything. Do not emit CODEX_REVIEW_FIXED.
+CONTEXT_EOF
+    return 0
+  fi
+
   if [ "$PROMPT_CONTEXT_DECISION" = "bounded" ]; then
     cat <<CONTEXT_EOF
 ## Project context mode
@@ -1211,19 +1357,193 @@ CONTEXT_EOF
 }
 
 # --------------------------------------------------------------------------
+# Large-diff Touchstone sync slicing
+# --------------------------------------------------------------------------
+
+is_touchstone_source_repo() {
+  local repo_root_physical touchstone_root_physical
+
+  repo_root_physical="$(cd "$REPO_ROOT" 2>/dev/null && pwd -P)" || return 1
+  touchstone_root_physical="$(cd "$TOUCHSTONE_ROOT" 2>/dev/null && pwd -P)" || return 1
+  [ "$repo_root_physical" = "$touchstone_root_physical" ] || return 1
+
+  # In downstream projects the installed hook runs from scripts/conductor-review.sh
+  # or the legacy scripts/codex-review.sh compatibility path,
+  # so TOUCHSTONE_ROOT intentionally resolves to the project root. Only disable
+  # sync-slice elision in the actual Touchstone source checkout.
+  [ -f "$repo_root_physical/bootstrap/update-project.sh" ] \
+    && [ -f "$repo_root_physical/hooks/codex-review.sh" ] \
+    && [ -f "$repo_root_physical/bin/touchstone" ]
+}
+
+manifest_paths_at_ref() {
+  local ref="$1"
+
+  git show "$ref:.touchstone-manifest" 2>/dev/null | awk '
+    {
+      sub(/\r$/, "")
+      sub(/^[[:space:]]+/, "")
+      sub(/[[:space:]]+$/, "")
+    }
+    $0 == "" { next }
+    $0 ~ /^#/ { next }
+    {
+      sub(/^\.\//, "")
+      print
+    }
+  '
+}
+
+path_is_mixed_ownership() {
+  case "$1" in
+    .touchstone-manifest | AGENTS.md | CLAUDE.md | GEMINI.md | .touchstone-review.toml | .codex-review.toml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+trusted_touchstone_managed_paths() {
+  local base_ref="$1"
+  local head_ref="$2"
+  local base_paths head_paths
+
+  base_paths="$(mktemp "${TMPDIR:-/tmp}/touchstone-base-manifest.XXXXXX")"
+  head_paths="$(mktemp "${TMPDIR:-/tmp}/touchstone-head-manifest.XXXXXX")"
+
+  manifest_paths_at_ref "$base_ref" | LC_ALL=C sort -u >"$base_paths"
+  manifest_paths_at_ref "$head_ref" | LC_ALL=C sort -u >"$head_paths"
+
+  if [ ! -s "$base_paths" ] || [ ! -s "$head_paths" ]; then
+    rm -f "$base_paths" "$head_paths"
+    return 1
+  fi
+
+  comm -12 "$base_paths" "$head_paths" | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    path_is_mixed_ownership "$path" && continue
+    printf '%s\n' "$path"
+  done
+  rm -f "$base_paths" "$head_paths"
+}
+
+path_is_trusted_touchstone_managed() {
+  local changed_path="$1"
+  local trusted_paths_file="$2"
+  local managed_path
+
+  [ -f "$trusted_paths_file" ] || return 1
+  while IFS= read -r managed_path; do
+    [ -n "$managed_path" ] || continue
+    if [ "$changed_path" = "$managed_path" ]; then
+      return 0
+    fi
+    case "$managed_path" in
+      */)
+        case "$changed_path" in
+          "$managed_path"*) return 0 ;;
+        esac
+        ;;
+    esac
+  done <"$trusted_paths_file"
+
+  return 1
+}
+
+prepare_large_diff_scoped_review() {
+  local total_lines="$1"
+  local trusted_paths_file changed_path
+  local -a scoped_paths=()
+
+  case "$MAX_DIFF_LINES" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$total_lines" -gt "$MAX_DIFF_LINES" ] 2>/dev/null || return 0
+  is_touchstone_source_repo && return 1
+
+  trusted_paths_file="$(mktemp "${TMPDIR:-/tmp}/touchstone-trusted-manifest.XXXXXX")"
+  if ! trusted_touchstone_managed_paths "$MERGE_BASE" HEAD >"$trusted_paths_file"; then
+    rm -f "$trusted_paths_file"
+    return 1
+  fi
+  if [ ! -s "$trusted_paths_file" ]; then
+    rm -f "$trusted_paths_file"
+    return 1
+  fi
+
+  SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-scoped-included.XXXXXX")"
+  SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-scoped-excluded.XXXXXX")"
+  : >"$SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE"
+  : >"$SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE"
+
+  while IFS= read -r -d '' changed_path; do
+    [ -n "$changed_path" ] || continue
+    if path_is_trusted_touchstone_managed "$changed_path" "$trusted_paths_file"; then
+      printf '%s\n' "$changed_path" >>"$SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE"
+    else
+      printf '%s\n' "$changed_path" >>"$SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE"
+    fi
+  done < <(git diff --name-only -z "$MERGE_BASE"..HEAD)
+  rm -f "$trusted_paths_file"
+
+  SCOPED_LARGE_DIFF_EXCLUDED_COUNT="$(sed '/^$/d' "$SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE" | wc -l | tr -d ' ')"
+  SCOPED_LARGE_DIFF_INCLUDED_COUNT="$(sed '/^$/d' "$SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE" | wc -l | tr -d ' ')"
+  [ "$SCOPED_LARGE_DIFF_EXCLUDED_COUNT" -gt 0 ] 2>/dev/null || return 1
+
+  if [ "$SCOPED_LARGE_DIFF_INCLUDED_COUNT" -eq 0 ] 2>/dev/null; then
+    SCOPED_LARGE_DIFF_SYNC_ONLY=true
+    SCOPED_LARGE_DIFF_ORIGINAL_LINES="$total_lines"
+    return 0
+  fi
+
+  while IFS= read -r changed_path; do
+    [ -n "$changed_path" ] || continue
+    scoped_paths+=("$changed_path")
+  done <"$SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE"
+
+  SCOPED_LARGE_DIFF_FILE="$(mktemp "${TMPDIR:-/tmp}/touchstone-scoped-diff.XXXXXX")"
+  git diff "$MERGE_BASE"..HEAD -- "${scoped_paths[@]}" >"$SCOPED_LARGE_DIFF_FILE"
+  SCOPED_LARGE_DIFF_LINES="$(wc -l <"$SCOPED_LARGE_DIFF_FILE" | tr -d ' ')"
+  SCOPED_LARGE_DIFF_ORIGINAL_LINES="$total_lines"
+
+  if [ "$SCOPED_LARGE_DIFF_LINES" -gt "$MAX_DIFF_LINES" ] 2>/dev/null; then
+    SCOPED_LARGE_DIFF_REVIEW=false
+    return 1
+  fi
+
+  SCOPED_LARGE_DIFF_REVIEW=true
+  PROMPT_CONTEXT_DECISION="scoped"
+  PROMPT_CONTEXT_REASON="large Touchstone-managed diff sliced to project-owned files"
+  return 0
+}
+
+# --------------------------------------------------------------------------
 # Build the auto-fix policy section of the prompt from config
 # --------------------------------------------------------------------------
 
 build_autofix_policy() {
   local policy=""
 
-  if ! mode_allows_fix; then
+  if ! mode_allows_fix || [ "${REVIEW_PHASE:-review}" != "fix" ]; then
+    if [ "$SAFE_BY_DEFAULT" = "true" ]; then
+      policy="By default, all paths are SAFE to auto-fix unless listed as unsafe."
+    else
+      policy="By default, all paths are NOT safe to auto-fix. Only paths explicitly marked as safe are fixable."
+    fi
+    if [ -n "$UNSAFE_PATHS" ]; then
+      policy="$policy
+
+NOT safe to auto-fix:
+$(echo "$UNSAFE_PATHS" | while read -r p; do [ -n "$p" ] && echo "- Anything in $p"; done)"
+    fi
     cat <<POLICY_EOF
-Mode: $REVIEW_MODE — do not edit files. Do not stage, commit, or modify anything.
+Mode: $REVIEW_MODE, phase: read-only review — do not edit files. Do not stage, commit, or modify anything.
+
+Auto-fix classification context:
+$policy
 
 Review only:
 - If there are no blocking issues, emit CLEAN.
 - If any issue needs a code or documentation change, emit BLOCKED with findings.
+- If a finding appears safely auto-fixable under the project policy, mark that line with [fixable].
 - Do not emit FIXED.
 
 When in doubt, STOP and emit BLOCKED.
@@ -1276,6 +1596,39 @@ NOT safe to auto-fix regardless of path (STOP and emit BLOCKED):
 When in doubt, STOP and emit BLOCKED."
 
   echo "$policy"
+}
+
+build_fix_prompt() {
+  local review_output="$1"
+  local fix_policy
+  fix_policy="$(REVIEW_PHASE=fix build_autofix_policy)"
+
+  cat <<FIX_PROMPT_EOF
+You are applying safe fixes after a read-only Touchstone review.
+
+The read-only reviewer found these blockers:
+
+$review_output
+
+$(build_prompt_context_instructions)
+
+Examine the diff vs $BASE using your tools, then apply fixes only for the
+review findings below.
+
+## Fix policy
+
+$fix_policy
+
+Apply only the smallest safe changes needed for findings you can confidently fix.
+Do not broaden the diff, do not weaken tests, and do not fix findings outside the safe path policy.
+
+Output contract — strict:
+- Emit CODEX_REVIEW_FIXED if you changed files.
+- Emit CODEX_REVIEW_BLOCKED if any blocker remains unsafe or unclear to fix.
+- Do not emit CODEX_REVIEW_CLEAN from the fix phase.
+
+The LAST line of your output must be exactly CODEX_REVIEW_FIXED or CODEX_REVIEW_BLOCKED.
+FIX_PROMPT_EOF
 }
 
 build_preflight_review_policy() {
@@ -1346,11 +1699,40 @@ reviewer_conductor_auth_ok() {
 
 reviewer_conductor_exec() {
   local prompt="$1"
+  local phase="${REVIEW_PHASE:-review}"
   local -a args=()
   local subcommand
+  local tools
 
-  # Provider selection: --with <id> pins a specific provider; otherwise --auto
-  # lets the router pick based on prefer + effort + tags.
+  # REVIEW_MODE + REVIEW_PHASE → Conductor job shape. The default phase uses
+  # Conductor's semantic review command and lets Conductor own routing policy.
+  # Edit-capable work is a separate phase after a BLOCKED read-only review.
+  subcommand="$(conductor_subcommand_for_mode "$phase")"
+  tools="$(conductor_tools_for_mode "$phase")"
+
+  if [ "$subcommand" = "review" ]; then
+    local review_tags
+    review_tags="$(normalize_conductor_review_tags "${CONDUCTOR_TAGS:-}")"
+    [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
+    if [ -z "${CONDUCTOR_WITH:-}" ]; then
+      args+=(--prefer "${CONDUCTOR_PREFER:-best}")
+      [ -n "$review_tags" ] && args+=(--tags "$review_tags")
+    fi
+    args+=(--effort "${CONDUCTOR_EFFORT:-high}")
+    if [ -n "${CONDUCTOR_EXCLUDE:-}" ]; then
+      args+=(--exclude "$CONDUCTOR_EXCLUDE")
+    fi
+    args+=(--base "$BASE" --brief-file -)
+    if [ "${REVIEW_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
+      args+=(--timeout "$REVIEW_TIMEOUT")
+    fi
+    printf '%s' "$prompt" \
+      | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
+    return
+  fi
+
+  # Provider selection for exec/call paths: --with <id> pins a provider;
+  # otherwise --auto lets the router pick based on prefer + effort + tags.
   if [ -n "${CONDUCTOR_WITH:-}" ]; then
     args+=(--with "$CONDUCTOR_WITH")
   else
@@ -1359,35 +1741,7 @@ reviewer_conductor_exec() {
     [ -n "${CONDUCTOR_TAGS:-}" ] && args+=(--tags "$CONDUCTOR_TAGS")
     [ -n "${CONDUCTOR_EXCLUDE:-}" ] && args+=(--exclude "$CONDUCTOR_EXCLUDE")
   fi
-
-  # Effort applies whether manual-provider or auto-routed.
   args+=(--effort "${CONDUCTOR_EFFORT:-high}")
-
-  # REVIEW_MODE → subcommand + tools. Conductor translates these portable tool
-  # names into each provider's native permission/sandbox contract.
-  local tools=""
-  subcommand="$(conductor_subcommand_for_mode)"
-  case "$REVIEW_MODE" in
-    diff-only)
-      # Single-turn call — the diff is already embedded in the prompt.
-      ;;
-    review-only)
-      subcommand="exec"
-      tools="Read,Grep,Glob,Bash"
-      ;;
-    no-tests)
-      subcommand="exec"
-      tools="Read,Grep,Glob,Edit,Write"
-      ;;
-    fix)
-      subcommand="exec"
-      tools="Read,Grep,Glob,Bash,Edit,Write"
-      ;;
-    *)
-      subcommand="exec"
-      tools="Read,Grep,Glob,Bash"
-      ;;
-  esac
 
   if [ "$subcommand" = "exec" ]; then
     args+=(--tools "$tools")
@@ -1405,11 +1759,230 @@ reviewer_conductor_exec() {
     | CODEX_REVIEW_IN_PROGRESS=1 conductor "$subcommand" "${args[@]}"
 }
 
+conductor_csv_empty_or_only_ollama() {
+  local raw="${1:-}"
+  local item
+  local -a items
+
+  [ -n "$raw" ] || return 0
+  IFS=',' read -r -a items <<<"$raw"
+  for item in "${items[@]}"; do
+    item="$(trim "$item")"
+    [ -z "$item" ] && continue
+    [ "$item" = "ollama" ] || return 1
+  done
+  return 0
+}
+
+conductor_should_use_semantic_review() {
+  [ "${CONDUCTOR_WITH:-}" != "ollama" ] || return 1
+  return 0
+}
+
+conductor_native_review_provider() {
+  case "$1" in
+    codex | claude | gemini) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+conductor_review_pin_exclude() {
+  local pinned="$1"
+  local existing="$2"
+  local provider
+  local exclude="$existing"
+
+  for provider in claude codex deepseek-chat deepseek-reasoner gemini kimi ollama openrouter; do
+    [ "$provider" = "$pinned" ] && continue
+    exclude="$(exclude_provider_once "$exclude" "$provider")"
+  done
+  printf '%s' "$exclude"
+}
+
 conductor_subcommand_for_mode() {
-  case "$REVIEW_MODE" in
-    diff-only) printf 'call' ;;
+  local phase="${1:-review}"
+
+  case "$phase:$REVIEW_MODE" in
+    review:diff-only) printf 'call' ;;
+    review:*)
+      if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+        printf 'call'
+      elif conductor_should_use_semantic_review; then
+        printf 'review'
+      else
+        printf 'exec'
+      fi
+      ;;
+    fix:*) printf 'exec' ;;
     *) printf 'exec' ;;
   esac
+}
+
+conductor_tools_for_mode() {
+  local phase="${1:-review}"
+
+  case "$phase:$REVIEW_MODE" in
+    review:diff-only) printf '' ;;
+    review:no-tests) printf 'Read,Grep,Glob' ;;
+    review:*) printf 'Read,Grep,Glob,Bash' ;;
+    fix:no-tests) printf 'Read,Grep,Glob,Edit,Write' ;;
+    fix:*) printf 'Read,Grep,Glob,Bash,Edit,Write' ;;
+    *) printf 'Read,Grep,Glob,Bash' ;;
+  esac
+}
+
+conductor_route_json_string_field() {
+  local json="$1"
+  local field="$2"
+  printf '%s\n' "$json" \
+    | sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+    | head -1
+}
+
+conductor_csv_contains() {
+  local csv="$1"
+  local wanted="$2"
+  local item
+  local -a items
+
+  [ -n "$csv" ] || return 1
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(trim "$item")"
+    if [ "$item" = "$wanted" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+conductor_semantic_review_provider() {
+  case "$1" in
+    claude | codex | gemini | openrouter) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+conductor_semantic_review_exclude() {
+  local existing="$1"
+  local provider
+  local exclude="$existing"
+
+  for provider in deepseek-chat deepseek-reasoner kimi ollama; do
+    exclude="$(exclude_provider_once "$exclude" "$provider")"
+  done
+  printf '%s' "$exclude"
+}
+
+conductor_route_preflight_for_phase() {
+  local phase="$1"
+  local subcommand="$2"
+  local tools="$3"
+  local route_tags route_exclude route_stderr route_json route_rc provider error
+  local estimated_input_tokens
+  local -a args
+
+  route_tags="$(normalize_conductor_review_tags "${CONDUCTOR_TAGS:-}")"
+  route_exclude="${CONDUCTOR_EXCLUDE:-}"
+
+  if [ "$subcommand" = "review" ]; then
+    if [ -n "${CONDUCTOR_WITH:-}" ] && ! conductor_semantic_review_provider "$CONDUCTOR_WITH"; then
+      echo "ERROR: Review route preflight failed before invoking reviewer." >&2
+      echo "       phase: $phase (subcommand=$subcommand, tools=${tools:-none})" >&2
+      echo "       requested provider: $CONDUCTOR_WITH" >&2
+      echo "       missing capability: pinned provider cannot satisfy semantic conductor review" >&2
+      echo "       next action: use claude, codex, gemini, openrouter, or unset TOUCHSTONE_CONDUCTOR_WITH for auto-routing." >&2
+      return 1
+    fi
+    route_exclude="$(conductor_semantic_review_exclude "$route_exclude")"
+  fi
+
+  if [ -n "${CONDUCTOR_WITH:-}" ]; then
+    if conductor_csv_contains "$route_exclude" "$CONDUCTOR_WITH"; then
+      echo "ERROR: Review route preflight failed before invoking reviewer." >&2
+      echo "       phase: $phase (subcommand=$subcommand, tools=${tools:-none})" >&2
+      echo "       requested provider: $CONDUCTOR_WITH" >&2
+      echo "       missing capability: pinned provider is excluded by TOUCHSTONE_CONDUCTOR_EXCLUDE/[review.conductor].exclude" >&2
+      echo "       next action: remove $CONDUCTOR_WITH from the exclusion list, unset TOUCHSTONE_CONDUCTOR_WITH, or pin a viable provider such as openrouter." >&2
+      return 1
+    fi
+    route_exclude="$(conductor_review_pin_exclude "$CONDUCTOR_WITH" "$route_exclude")"
+  fi
+
+  estimated_input_tokens=$((ROUTING_DIFF_LINE_COUNT * 20 + 1000))
+  args=(route --json --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
+    --estimated-input-tokens "$estimated_input_tokens" --estimated-output-tokens 500)
+  [ -n "$route_tags" ] && args+=(--tags "$route_tags")
+  [ -n "$tools" ] && args+=(--tools "$tools")
+  [ -n "$route_exclude" ] && args+=(--exclude "$route_exclude")
+
+  route_stderr="$(mktemp "${TMPDIR:-/tmp}/touchstone-route-preflight.XXXXXX")"
+  set +e
+  route_json="$(conductor "${args[@]}" 2>"$route_stderr")"
+  route_rc=$?
+  set -e
+
+  provider="$(conductor_route_json_string_field "$route_json" provider)"
+  error="$(conductor_route_json_string_field "$route_json" error)"
+  if [ -z "$error" ] && [ -s "$route_stderr" ]; then
+    error="$(tr '\n' ' ' <"$route_stderr" | sed 's/[[:space:]][[:space:]]*/ /g')"
+  fi
+  rm -f "$route_stderr"
+
+  if [ "$route_rc" -ne 0 ] || [ -z "$provider" ]; then
+    [ -n "$error" ] || error="no provider satisfies this route"
+    echo "ERROR: Review route preflight failed before invoking reviewer." >&2
+    echo "       phase: $phase (subcommand=$subcommand, tools=${tools:-none})" >&2
+    echo "       requested provider: ${CONDUCTOR_WITH:-auto}" >&2
+    echo "       provider exclusions: ${CONDUCTOR_EXCLUDE:-none}" >&2
+    case "$error" in
+      *"does not support tools"*) echo "       missing capability: $error" >&2 ;;
+      *) echo "       reason: $error" >&2 ;;
+    esac
+    echo "       next action: set TOUCHSTONE_CONDUCTOR_WITH=openrouter, remove over-broad exclusions, or run conductor doctor." >&2
+    return 1
+  fi
+
+  if [ -n "${CONDUCTOR_WITH:-}" ] && [ "$provider" != "$CONDUCTOR_WITH" ]; then
+    echo "ERROR: Review route preflight selected '$provider' while '$CONDUCTOR_WITH' was pinned." >&2
+    echo "       next action: unset TOUCHSTONE_CONDUCTOR_WITH or pin the selected viable provider." >&2
+    return 1
+  fi
+
+  echo "==> Review route preflight: $phase route viable via $provider (subcommand=$subcommand, tools=${tools:-none})"
+  return 0
+}
+
+run_conductor_route_preflight() {
+  local review_subcommand review_tools fix_tools
+
+  [ "${ACTIVE_REVIEWER:-}" = "conductor" ] || return 0
+
+  # Keep the extra subprocess out of ordinary feature-branch pre-push hooks;
+  # the merge gate sets CODEX_REVIEW_PR_NUMBER and is where route viability
+  # must fail closed before provider wall-clock time is spent.
+  if [ -z "${CODEX_REVIEW_PR_NUMBER:-}" ] && ! is_truthy "${TOUCHSTONE_REVIEW_ROUTE_PREFLIGHT:-false}"; then
+    return 0
+  fi
+
+  if ! conductor route --help >/dev/null 2>&1; then
+    echo "WARNING: conductor route preflight is unavailable; continuing without route viability validation." >&2
+    return 0
+  fi
+
+  echo "==> Review route preflight: mode=$REVIEW_MODE with=${CONDUCTOR_WITH:-auto} prefer=${CONDUCTOR_PREFER:-best} effort=${CONDUCTOR_EFFORT:-high} exclude=${CONDUCTOR_EXCLUDE:-none}"
+
+  review_subcommand="$(conductor_subcommand_for_mode review)"
+  review_tools=""
+  if [ "$review_subcommand" = "exec" ]; then
+    review_tools="$(conductor_tools_for_mode review)"
+  fi
+  conductor_route_preflight_for_phase review "$review_subcommand" "$review_tools" || return 1
+
+  if mode_allows_fix; then
+    fix_tools="$(conductor_tools_for_mode fix)"
+    conductor_route_preflight_for_phase fix exec "$fix_tools" || return 1
+  fi
 }
 
 # --------------------------------------------------------------------------
@@ -1555,6 +2128,40 @@ apply_review_routing() {
   fi
 }
 
+apply_high_scrutiny_policy() {
+  local changed_paths="${1:-}"
+  local mode match
+
+  HIGH_SCRUTINY_TRIGGERED=false
+  HIGH_SCRUTINY_REASON=""
+
+  [ -n "$changed_paths" ] || return 0
+  match="$(find_path_matching_context_patterns "$changed_paths" "$HIGH_SCRUTINY_PATHS" || true)"
+  [ -n "$match" ] || return 0
+
+  mode="$(printf '%s' "${HIGH_SCRUTINY_MODE:-peer}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode" in
+    peer | council) ;;
+    off | none | false | disabled)
+      return 0
+      ;;
+    *)
+      echo "WARNING: Invalid review.high_scrutiny_mode='$HIGH_SCRUTINY_MODE' — using peer." >&2
+      mode="peer"
+      ;;
+  esac
+
+  HIGH_SCRUTINY_TRIGGERED=true
+  HIGH_SCRUTINY_MODE="$mode"
+  HIGH_SCRUTINY_REASON="configured high-scrutiny path $match"
+
+  if [ -z "${CODEX_REVIEW_ASSIST+x}" ]; then
+    ASSIST_ENABLED=true
+  fi
+
+  echo "==> High-scrutiny review: $HIGH_SCRUTINY_REASON — ${HIGH_SCRUTINY_MODE} second opinion enabled"
+}
+
 run_reviewer() {
   "reviewer_${ACTIVE_REVIEWER}_exec" "$1"
 }
@@ -1585,6 +2192,11 @@ REVIEW_LOCK_TOKEN=""
 
 cleanup_review_process() {
   rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE" "$REVIEW_STDERR_FILE" "$REVIEW_CONDUCTOR_LOG_FILE"
+  rm -f \
+    "${SCOPED_LARGE_DIFF_FILE:-}" \
+    "${SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE:-}" \
+    "${SCOPED_LARGE_DIFF_EXCLUDED_PATHS_FILE:-}" \
+    2>/dev/null || true
   if [ "$REVIEW_LOCK_ACQUIRED" = true ] && [ -n "$REVIEW_LOCK_DIR" ]; then
     if [ "$(review_lock_metadata_value token 2>/dev/null || true)" = "$REVIEW_LOCK_TOKEN" ]; then
       rm -rf "$REVIEW_LOCK_DIR" 2>/dev/null || true
@@ -1676,6 +2288,7 @@ handle_error() {
   case "$reason" in
     timeout*) fail_open_code="FAIL_OPEN_TIMEOUT" ;;
     "malformed sentinel") fail_open_code="FAIL_OPEN_PARSE_ERROR" ;;
+    "provider unavailable:"*) fail_open_code="FAIL_OPEN_PROVIDER_UNAVAILABLE" ;;
     *) fail_open_code="FAIL_OPEN_REVIEWER_ERROR" ;;
   esac
 
@@ -1695,7 +2308,7 @@ handle_error() {
       echo "[fail-open:${fail_open_code}] missing sentinel — review verdict is untrustworthy; push allowed by policy" >&2
     fi
     echo "==> ERROR ($reason) — not blocking push (on_error=fail-open)."
-    echo "    Set on_error = \"fail-closed\" in .codex-review.toml to block on errors."
+    echo "    Set on_error = \"fail-closed\" in ${CONFIG_DISPLAY_NAME:-.touchstone-review.toml} to block on errors."
     log_skip_event "$fail_open_code" "fail-open:${reason}"
     exit 0
   fi
@@ -1832,9 +2445,9 @@ if is_pre_push_hook && ! is_truthy "${CODEX_REVIEW_FORCE:-false}"; then
 fi
 
 if ! is_truthy "$REVIEW_ENABLED"; then
-  echo "==> AI review disabled by .codex-review.toml — skipping review."
+  echo "==> AI review disabled by ${CONFIG_DISPLAY_NAME:-.touchstone-review.toml} — skipping review."
   # Distinguish "user set CODEX_REVIEW_ENABLED=false in their env" from
-  # "the project's .codex-review.toml has enabled=false" — the env var
+  # "the project's review config has enabled=false" — the env var
   # always wins, so its presence is the signal.
   if [ -n "${CODEX_REVIEW_ENABLED:-}" ] && ! is_truthy "${CODEX_REVIEW_ENABLED}"; then
     log_skip_event review-disabled-by-user "CODEX_REVIEW_ENABLED=${CODEX_REVIEW_ENABLED}"
@@ -1910,10 +2523,20 @@ fi
 
 ROUTING_DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
 PROMPT_CONTEXT_CHANGED_PATHS="$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || true)"
+apply_high_scrutiny_policy "$PROMPT_CONTEXT_CHANGED_PATHS"
 apply_review_routing "$ROUTING_DIFF_LINE_COUNT" "$PROMPT_CONTEXT_CHANGED_PATHS"
 
 # Resolve which reviewer to use from the cascade.
 if ! resolve_reviewer; then
+  unavailable_code="FAIL_OPEN_DEPENDENCY_MISSING"
+  unavailable_reason="dependency-missing"
+  unavailable_message="conductor CLI not found on PATH"
+  if reviewer_conductor_available; then
+    unavailable_code="FAIL_OPEN_PROVIDER_UNAVAILABLE"
+    unavailable_reason="provider-unavailable"
+    unavailable_message="conductor installed but no provider configured"
+  fi
+
   if [ -n "${TOUCHSTONE_REVIEWER:-}" ]; then
     echo "ERROR: TOUCHSTONE_REVIEWER=$TOUCHSTONE_REVIEWER but that reviewer is not available:" >&2
     printf '%b' "$REVIEWER_STATUS" >&2
@@ -1921,26 +2544,44 @@ if ! resolve_reviewer; then
     echo "  or unset TOUCHSTONE_REVIEWER to let Conductor auto-route." >&2
     exit 1
   fi
-  echo "==> No reviewer available — push will proceed without AI review."
+  if [ "$ON_ERROR" = "fail-closed" ]; then
+    echo "==> No reviewer available — AI review cannot run."
+  else
+    echo "==> No reviewer available — push will proceed without AI review."
+  fi
   printf '%b' "$REVIEWER_STATUS"
   echo "    Touchstone 2.0 routes every review through the \`conductor\` CLI."
   echo "    Fix above, then re-run \`git push\` to trigger review again."
+  echo "==> Review status: provider/infrastructure unavailable; findings=0; exit_reason=$unavailable_reason"
+  if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
+    printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","exit_reason":"%s","elapsed_seconds":0}\n' \
+      "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" \
+      "$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null | wc -l | tr -d ' ')" "$ROUTING_DIFF_LINE_COUNT" \
+      "${HIGH_SCRUTINY_TRIGGERED:-false}" "${HIGH_SCRUTINY_MODE:-peer}" "$unavailable_reason" \
+      >"$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
+  fi
   # Distinguish: CLI not on PATH vs CLI present but no provider configured.
   # Emit a visible [fail-open:<code>] line so the absent safety boundary
   # is not silent ("No silent failures" principle).
-  if reviewer_conductor_available; then
-    echo "[fail-open:FAIL_OPEN_PROVIDER_UNAVAILABLE] conductor installed but no provider configured — AI review bypassed, push proceeds" >&2
-    log_skip_event FAIL_OPEN_PROVIDER_UNAVAILABLE "no-provider-configured"
-  else
-    echo "[fail-open:FAIL_OPEN_DEPENDENCY_MISSING] conductor CLI not found on PATH — AI review bypassed, push proceeds" >&2
-    log_skip_event FAIL_OPEN_DEPENDENCY_MISSING "conductor-not-on-path"
+  if [ "$ON_ERROR" = "fail-closed" ]; then
+    echo "[fail-closed:${unavailable_code}] ${unavailable_message} — AI review unavailable, push blocked" >&2
+    echo "==> ERROR ($unavailable_reason) — blocking push (on_error=fail-closed)." >&2
+    log_skip_event "$unavailable_code" "fail-closed:${unavailable_reason}"
+    exit 1
   fi
+  echo "[fail-open:${unavailable_code}] ${unavailable_message} — AI review bypassed, push proceeds" >&2
+  log_skip_event "$unavailable_code" "fail-open:${unavailable_reason}"
   exit 0
 fi
 REVIEWER_LABEL="$(reviewer_label)"
 select_prompt_context_mode "$ROUTING_DIFF_LINE_COUNT" "$PROMPT_CONTEXT_CHANGED_PATHS"
+prepare_large_diff_scoped_review "$ROUTING_DIFF_LINE_COUNT" || true
 echo "==> Using reviewer: $REVIEWER_LABEL"
-echo "==> Prompt context: $PROMPT_CONTEXT_DECISION ($PROMPT_CONTEXT_REASON)"
+if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+  echo "==> Prompt context: scoped large-diff review (${SCOPED_LARGE_DIFF_LINES}/${SCOPED_LARGE_DIFF_ORIGINAL_LINES} lines reviewed)"
+else
+  echo "==> Prompt context: $PROMPT_CONTEXT_DECISION ($PROMPT_CONTEXT_REASON)"
+fi
 if [ -n "$REVIEW_CONTEXT_FILE" ]; then
   echo "==> Review context: $(basename "$REVIEW_CONTEXT_FILE")"
 fi
@@ -1966,9 +2607,17 @@ Do not flag intentional design decisions that are explained in the commit messag
 
 $(git log --reverse --format='### %s%n%n%b' "$MERGE_BASE"..HEAD 2>/dev/null | sed '/^$/N;/^\n$/d')
 
-Examine the diff vs $BASE using your tools.
-$(if [ "$REVIEW_MODE" = "diff-only" ]; then
-  printf '\n## Diff (included because mode=diff-only restricts tool access)\n\n```\n'
+$(if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+  printf 'Examine only the embedded scoped project-owned diff below. Do not review excluded Touchstone-managed sync files.\n'
+else
+  printf 'Examine the diff vs %s using your tools.\n' "$BASE"
+fi)
+$(if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+  printf '\n## Diff (scoped project-owned slice)\n\n```diff\n'
+  cat "$SCOPED_LARGE_DIFF_FILE"
+  printf '```\n'
+elif [ "$REVIEW_MODE" = "diff-only" ]; then
+  printf '\n## Diff (included because mode=diff-only restricts tool access)\n\n```diff\n'
   git diff "$MERGE_BASE"..HEAD 2>/dev/null
   printf '```\n'
 fi)
@@ -2071,6 +2720,9 @@ review_cache_key() {
     printf 'assist_timeout=%s\n' "${ASSIST_TIMEOUT:-}"
     printf 'assist_max_rounds=%s\n' "${ASSIST_MAX_ROUNDS:-}"
     printf 'assist_helpers=%s\n' "${ASSIST_HELPERS[*]:-}"
+    printf 'high_scrutiny_triggered=%s\n' "${HIGH_SCRUTINY_TRIGGERED:-false}"
+    printf 'high_scrutiny_mode=%s\n' "${HIGH_SCRUTINY_MODE:-peer}"
+    printf 'high_scrutiny_reason=%s\n' "${HIGH_SCRUTINY_REASON:-}"
     # Conductor knobs (CLI-effective values, post env+config resolution).
     # Without these, a review at prefer=cheapest/effort=minimal would
     # silently satisfy a later push expecting prefer=best/effort=high
@@ -2088,8 +2740,8 @@ review_cache_key() {
       printf '\n-- AGENTS.md --\n<omitted: prompt_context_mode=%s>\n' "${PROMPT_CONTEXT_DECISION:-}"
       printf '\n-- CLAUDE.md --\n<omitted: prompt_context_mode=%s>\n' "${PROMPT_CONTEXT_DECISION:-}"
     fi
-    append_cache_file ".codex-review.toml" "${CONFIG_FILE:-}"
-    append_cache_file "codex-review.sh" "$0"
+    append_cache_file "review-config" "${CONFIG_FILE:-}"
+    append_cache_file "conductor-review.sh" "$0"
     if [ -n "${REVIEW_CONTEXT_FILE:-}" ]; then
       append_cache_file "codex-review-context" "$REVIEW_CONTEXT_FILE"
     fi
@@ -2607,11 +3259,18 @@ run_assist_review() {
 # --------------------------------------------------------------------------
 
 FIX_COMMITS=0
+REVIEW_PHASE="review"
 ASSIST_ROUNDS=0
 BANNER_PRINTED=false
 REVIEW_START_TIME="$(date +%s)"
 REVIEW_FILES_INSPECTED="$(git diff --name-only "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
 REVIEW_EXIT_REASON=""
+REVIEW_FALLBACK_ATTEMPTED=false
+REVIEW_FALLBACK_PRIMARY_PROVIDER=""
+REVIEW_FALLBACK_RETRY_PROVIDER=""
+REVIEW_FALLBACK_EXCLUDED_PROVIDERS=""
+REVIEW_FALLBACK_REASON=""
+FALLBACK_REVIEW_EXIT=0
 
 # --------------------------------------------------------------------------
 # Phase labels
@@ -2676,6 +3335,49 @@ conductor_log_string_field() {
     | head -1
 }
 
+conductor_stderr_success_provider() {
+  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  [ -f "$stderr_file" ] || return 0
+  awk '
+    /review tried providers:/ { line = $0 }
+    END {
+      if (line == "") {
+        exit
+      }
+      sub(/^.*review tried providers:[[:space:]]*/, "", line)
+      n = split(line, parts, ",")
+      for (i = 1; i <= n; i++) {
+        part = parts[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", part)
+        if (part ~ /\(success\)/) {
+          split(part, fields, /[[:space:]]+/)
+          print fields[1]
+          exit
+        }
+      }
+    }
+  ' "$stderr_file" 2>/dev/null || true
+}
+
+conductor_stderr_first_tried_provider() {
+  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  [ -f "$stderr_file" ] || return 0
+  awk '
+    /review tried providers:/ { line = $0 }
+    END {
+      if (line == "") {
+        exit
+      }
+      sub(/^.*review tried providers:[[:space:]]*/, "", line)
+      split(line, parts, ",")
+      part = parts[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", part)
+      split(part, fields, /[[:space:]]+/)
+      print fields[1]
+    }
+  ' "$stderr_file" 2>/dev/null || true
+}
+
 # --------------------------------------------------------------------------
 # Peer review ([review.assist], v2.1) — second-opinion pass via Conductor.
 # --------------------------------------------------------------------------
@@ -2693,14 +3395,34 @@ parse_primary_provider() {
     printf '%s' "$provider"
     return
   fi
+  provider="$(conductor_stderr_success_provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return
+  fi
+  provider="$(conductor_log_string_field "${REVIEW_CONDUCTOR_LOG_FILE:-}" provider_failed provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return
+  fi
+  provider="$(conductor_log_string_field "${REVIEW_CONDUCTOR_LOG_FILE:-}" provider_started provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return
+  fi
+  provider="$(conductor_stderr_first_tried_provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return
+  fi
 
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || {
     printf ''
     return
   }
   local line
-  line="$(grep -m1 '^\[conductor\]' "$stderr_file" 2>/dev/null || true)"
+  line="$(grep -m1 -E '(^\[conductor\]|Conductor).*(→|->)' "$stderr_file" 2>/dev/null || true)"
   [ -n "$line" ] || {
     printf ''
     return
@@ -2720,7 +3442,7 @@ parse_primary_model() {
     return
   fi
 
-  local stderr_file="${1:-$REVIEW_STDERR_FILE}"
+  local stderr_file="$REVIEW_STDERR_FILE"
   [ -f "$stderr_file" ] || {
     printf ''
     return
@@ -2773,22 +3495,197 @@ print_malformed_sentinel_diagnostics() {
   echo "    Conductor command invoked: $(conductor_invocation_label)"
 }
 
-# Run a peer review via Conductor, excluding the primary's provider.
-# Advisory — peer output appears in the transcript but does not gate the
-# merge. When the primary provider can't be identified (missing or
-# unparseable route-log), skip rather than invoke `conductor` without
-# --exclude (which could reuse the primary).
+exclude_provider_once() {
+  local existing="$1"
+  local provider="$2"
+  local item
+  local -a existing_items
+
+  [ -n "$provider" ] || {
+    printf '%s' "$existing"
+    return 0
+  }
+
+  if [ -n "$existing" ]; then
+    IFS=',' read -r -a existing_items <<<"$existing"
+    for item in "${existing_items[@]}"; do
+      item="$(trim "$item")"
+      if [ "$item" = "$provider" ]; then
+        printf '%s' "$existing"
+        return 0
+      fi
+    done
+  fi
+
+  if [ -n "$existing" ]; then
+    printf '%s,%s' "$existing" "$provider"
+  else
+    printf '%s' "$provider"
+  fi
+}
+
+exclude_provider_csv() {
+  local existing="$1"
+  local providers="$2"
+  local item result
+  local -a provider_items
+
+  result="$existing"
+  if [ -n "$providers" ]; then
+    IFS=',' read -r -a provider_items <<<"$providers"
+    for item in "${provider_items[@]}"; do
+      item="$(trim "$item")"
+      [ -n "$item" ] || continue
+      result="$(exclude_provider_once "$result" "$item")"
+    done
+  fi
+  printf '%s' "$result"
+}
+
+conductor_failed_provider_csv() {
+  local csv="" provider
+
+  while IFS= read -r provider; do
+    provider="$(trim "$provider")"
+    [ -n "$provider" ] || continue
+    csv="$(exclude_provider_once "$csv" "$provider")"
+  done < <(
+    if [ -f "${REVIEW_CONDUCTOR_LOG_FILE:-}" ]; then
+      awk '
+        /"event"[[:space:]]*:[[:space:]]*"provider_failed"/ {
+          line = $0
+          sub(/^.*"provider"[[:space:]]*:[[:space:]]*"/, "", line)
+          sub(/".*$/, "", line)
+          if (line != "") {
+            print line
+          }
+        }
+      ' "$REVIEW_CONDUCTOR_LOG_FILE" 2>/dev/null || true
+    fi
+    if [ -f "${REVIEW_STDERR_FILE:-}" ]; then
+      awk '
+        /review tried providers:/ { line = $0 }
+        END {
+          if (line == "") {
+            exit
+          }
+          sub(/^.*review tried providers:[[:space:]]*/, "", line)
+          n = split(line, parts, ",")
+          for (i = 1; i <= n; i++) {
+            part = parts[i]
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", part)
+            if (part == "" || part ~ /\(success\)/) {
+              continue
+            }
+            split(part, fields, /[[:space:]]+/)
+            if (fields[1] != "") {
+              print fields[1]
+            }
+          }
+        }
+      ' "$REVIEW_STDERR_FILE" 2>/dev/null || true
+    fi
+  )
+
+  printf '%s' "$csv"
+}
+
+review_attempt_worktree_unchanged() {
+  local head_before="$1"
+  local status_before="$2"
+  local head_after status_after
+
+  head_after="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  status_after="$(git status --porcelain)"
+
+  [ "$head_after" = "$head_before" ] && [ "$status_after" = "$status_before" ]
+}
+
+try_review_fallback_retry() {
+  local reason="$1"
+  local head_before="$2"
+  local status_before="$3"
+  local prompt="${4:-$REVIEW_PROMPT}"
+  local output_file="${5:-$REVIEW_OUTPUT_FILE}"
+  local failed_provider failed_providers previous_with previous_exclude fallback_exclude
+
+  [ "${ACTIVE_REVIEWER:-}" = "conductor" ] || return 1
+  is_truthy "$CONDUCTOR_FALLBACK_RETRY" || return 1
+  [ "$REVIEW_FALLBACK_ATTEMPTED" = false ] || return 1
+
+  if ! review_attempt_worktree_unchanged "$head_before" "$status_before"; then
+    echo "==> Review fallback skipped: failed attempt changed the worktree."
+    return 1
+  fi
+
+  failed_provider="$(parse_primary_provider)"
+  [ -n "$failed_provider" ] || failed_provider="${CONDUCTOR_WITH:-}"
+  failed_providers="$(conductor_failed_provider_csv)"
+  if [ -n "$failed_provider" ] && [ "$failed_provider" != "unknown" ]; then
+    failed_providers="$(exclude_provider_once "$failed_providers" "$failed_provider")"
+  fi
+  if [ -z "$failed_provider" ] || [ "$failed_provider" = "unknown" ]; then
+    echo "==> Review fallback skipped: could not identify the failed Conductor provider."
+    return 1
+  fi
+  [ -n "$failed_providers" ] || failed_providers="$failed_provider"
+
+  REVIEW_FALLBACK_ATTEMPTED=true
+  REVIEW_FALLBACK_PRIMARY_PROVIDER="$failed_provider"
+  REVIEW_FALLBACK_EXCLUDED_PROVIDERS="$failed_providers"
+  REVIEW_FALLBACK_REASON="$reason"
+
+  previous_with="$CONDUCTOR_WITH"
+  previous_exclude="$CONDUCTOR_EXCLUDE"
+  fallback_exclude="$(exclude_provider_csv "$CONDUCTOR_EXCLUDE" "$failed_providers")"
+
+  phase "retrying with Conductor fallback (excluding $failed_providers)"
+  echo "==> Review infrastructure/noncompliance failure: $reason"
+  echo "==> Retrying once with auto-routing; excluded provider(s): ${fallback_exclude:-<none>}"
+
+  CONDUCTOR_WITH=""
+  CONDUCTOR_EXCLUDE="$fallback_exclude"
+  set +e
+  run_reviewer_with_timeout "$REVIEW_TIMEOUT" "$prompt" "$output_file"
+  FALLBACK_REVIEW_EXIT=$?
+  set -e
+  REVIEW_FALLBACK_RETRY_PROVIDER="$(parse_primary_provider)"
+  [ -n "$REVIEW_FALLBACK_RETRY_PROVIDER" ] || REVIEW_FALLBACK_RETRY_PROVIDER="unknown"
+
+  CONDUCTOR_WITH="$previous_with"
+  CONDUCTOR_EXCLUDE="$previous_exclude"
+
+  # The clean-review cache key was computed for the primary route. A fallback
+  # clean result is valid for this run, but should not satisfy a later exact
+  # cache lookup for the primary provider.
+  REVIEW_CACHE_KEY=""
+  return 0
+}
+
+# Run a peer/council review via Conductor. Peer mode excludes the primary's
+# provider. Council mode asks Conductor for a multi-model synthesis.
+# Advisory — second-opinion output appears in the transcript but does not gate
+# the merge. When peer mode can't identify the primary provider, skip rather
+# than invoke `conductor` without --exclude (which could reuse the primary).
 run_peer_review() {
   local primary_output="$1"
-  local primary_provider
+  local primary_provider mode
   primary_provider="$(parse_primary_provider)"
+  mode="peer"
+  if [ "${HIGH_SCRUTINY_TRIGGERED:-false}" = true ]; then
+    mode="${HIGH_SCRUTINY_MODE:-peer}"
+  fi
 
-  if [ -z "$primary_provider" ]; then
+  if [ "$mode" = "peer" ] && [ -z "$primary_provider" ]; then
     phase "peer review skipped — couldn't identify primary provider"
     return 0
   fi
 
-  phase "peer review — asking Conductor for a second opinion (excluding $primary_provider)"
+  if [ "$mode" = "council" ]; then
+    phase "council review — asking Conductor for high-scrutiny synthesis"
+  else
+    phase "peer review — asking Conductor for a second opinion (excluding $primary_provider)"
+  fi
 
   local peer_prompt
   peer_prompt="$(build_peer_review_prompt "$primary_output")"
@@ -2800,13 +3697,21 @@ run_peer_review() {
   # handling; ASSIST_TIMEOUT still applies to explicit assistant loops.
   PEER_CONDUCTOR_LOG_FILE=""
   peer_log_before="$(latest_conductor_session_log)"
-  peer_output="$(printf '%s' "$peer_prompt" \
-    | conductor call --auto \
-      --exclude "$primary_provider" \
-      --tags code-review \
-      --effort medium \
-      --silent-route \
-      2>/dev/null || true)"
+  if [ "$mode" = "council" ]; then
+    local brief_file
+    brief_file="$(mktemp "${TMPDIR:-/tmp}/touchstone-review-council.XXXXXX.md")"
+    printf '%s\n' "$peer_prompt" >"$brief_file"
+    peer_output="$(conductor ask --kind council --effort medium --brief-file "$brief_file" 2>/dev/null || true)"
+    rm -f "$brief_file"
+  else
+    peer_output="$(printf '%s' "$peer_prompt" \
+      | conductor call --auto \
+        --exclude "$primary_provider" \
+        --tags code-review \
+        --effort medium \
+        --silent-route \
+        2>/dev/null || true)"
+  fi
   peer_log_after="$(latest_conductor_session_log)"
   if [ -n "$peer_log_after" ] && [ "$peer_log_after" != "$peer_log_before" ]; then
     PEER_CONDUCTOR_LOG_FILE="$peer_log_after"
@@ -2817,9 +3722,14 @@ run_peer_review() {
     return 0
   fi
 
-  printf "\n  ${C_DIM}── peer review (excluded %s) ──${C_RESET}\n" "$primary_provider"
+  if [ "$mode" = "council" ]; then
+    printf "\n  ${C_DIM}── council review (%s) ──${C_RESET}\n" "${HIGH_SCRUTINY_REASON:-high-scrutiny}"
+  else
+    printf "\n  ${C_DIM}── peer review (excluded %s) ──${C_RESET}\n" "$primary_provider"
+  fi
   printf '%s\n' "$peer_output" | sed 's/^/  /'
   printf "\n"
+  ASSIST_ROUNDS=$((ASSIST_ROUNDS + 1))
   ASSIST_ROUNDS_DONE=$((${ASSIST_ROUNDS_DONE:-0} + 1))
 }
 
@@ -2875,6 +3785,89 @@ check_worktree_invariants() {
   return 0
 }
 
+block_if_worktree_mutated_in_review_mode() {
+  if mode_allows_fix && [ "${REVIEW_PHASE:-review}" != "review" ]; then
+    return 0
+  fi
+
+  if check_worktree_invariants; then
+    return 0
+  fi
+
+  REVIEW_EXIT_REASON="worktree-mutated"
+  print_summary
+  if mode_allows_fix; then
+    echo "==> ERROR: Worktree was mutated during the read-only review phase in '$REVIEW_MODE' mode — blocking push." >&2
+  else
+    echo "==> ERROR: Worktree was mutated in '$REVIEW_MODE' mode — blocking push." >&2
+  fi
+  exit 1
+}
+
+run_fix_phase_for_blocked_review() {
+  local review_output="$1"
+  local fix_prompt fix_exit fix_output fix_sentinel
+
+  mode_allows_fix || return 1
+  [ "${REVIEW_FIX_ATTEMPTED:-false}" = false ] || return 1
+
+  if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then
+    echo "==> Skipping auto-fix: working tree was already dirty before review."
+    return 1
+  fi
+
+  REVIEW_FIX_ATTEMPTED=true
+  fix_prompt="$(build_fix_prompt "$review_output")"
+
+  phase "fixing review findings with $REVIEWER_LABEL"
+  set +e
+  REVIEW_PHASE=fix run_reviewer_with_timeout "$REVIEW_TIMEOUT" "$fix_prompt" "$REVIEW_OUTPUT_FILE"
+  fix_exit=$?
+  set -e
+  fix_output="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
+  print_route_log
+
+  if [ "$fix_exit" -eq 124 ]; then
+    echo "==> $REVIEWER_LABEL fix phase timed out after ${REVIEW_TIMEOUT}s; blocking on the read-only findings."
+    OUTPUT="$review_output"
+    LAST_SENTINEL="CODEX_REVIEW_BLOCKED"
+    return 0
+  fi
+
+  if [ "$fix_exit" -ne 0 ]; then
+    echo "==> $REVIEWER_LABEL fix phase failed with exit $fix_exit; blocking on the read-only findings."
+    OUTPUT="$review_output"
+    LAST_SENTINEL="CODEX_REVIEW_BLOCKED"
+    return 0
+  fi
+
+  fix_sentinel="$(printf '%s\n' "$fix_output" | extract_review_sentinel)"
+  case "$fix_sentinel" in
+    CODEX_REVIEW_FIXED)
+      OUTPUT="$fix_output"
+      LAST_SENTINEL="CODEX_REVIEW_FIXED"
+      return 0
+      ;;
+    CODEX_REVIEW_BLOCKED)
+      OUTPUT="${review_output}
+
+Fix phase output:
+${fix_output}"
+      LAST_SENTINEL="CODEX_REVIEW_BLOCKED"
+      return 0
+      ;;
+    *)
+      echo "==> $REVIEWER_LABEL fix phase output did not match the sentinel contract; blocking on the read-only findings."
+      OUTPUT="${review_output}
+
+Malformed fix phase output:
+${fix_output}"
+      LAST_SENTINEL="CODEX_REVIEW_BLOCKED"
+      return 0
+      ;;
+  esac
+}
+
 # --------------------------------------------------------------------------
 # Structured summary
 # --------------------------------------------------------------------------
@@ -2905,15 +3898,35 @@ print_summary() {
   printf "  ${C_DIM}iterations:     %s/%s${C_RESET}\n" "${iter:-0}" "$MAX_ITERATIONS"
   printf "  ${C_DIM}fix commits:    %s${C_RESET}\n" "$FIX_COMMITS"
   printf "  ${C_DIM}peer assists:   %s${C_RESET}\n" "$ASSIST_ROUNDS"
+  if [ "${HIGH_SCRUTINY_TRIGGERED:-false}" = true ]; then
+    printf "  ${C_DIM}high scrutiny:  %s (%s)${C_RESET}\n" "$HIGH_SCRUTINY_MODE" "$HIGH_SCRUTINY_REASON"
+  fi
   printf "  ${C_DIM}findings:       %s${C_RESET}\n" "$findings"
+  if [ "$REVIEW_FALLBACK_ATTEMPTED" = true ]; then
+    printf "  ${C_DIM}fallback:       %s -> %s (%s)${C_RESET}\n" \
+      "${REVIEW_FALLBACK_PRIMARY_PROVIDER:-unknown}" \
+      "${REVIEW_FALLBACK_RETRY_PROVIDER:-unknown}" \
+      "${REVIEW_FALLBACK_REASON:-unknown}"
+    if [ -n "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-}" ]; then
+      printf "  ${C_DIM}fallback skip:  %s${C_RESET}\n" "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-unknown}"
+    fi
+  fi
   printf "  ${C_DIM}exit reason:    %s${C_RESET}\n" "$REVIEW_EXIT_REASON"
   printf "  ${C_DIM}elapsed:        %dm%ds${C_RESET}\n" "$mins" "$secs"
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"findings":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
+    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"%s","findings":%d,"fallback_attempted":%s,"fallback_primary_provider":"%s","fallback_retry_provider":"%s","fallback_excluded_providers":"%s","fallback_reason":"%s","exit_reason":"%s","elapsed_seconds":%d}\n' \
       "$REVIEWER_LABEL" "$provider" "$model" "$peer_provider" "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
-      "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "$findings" "$REVIEW_EXIT_REASON" "$elapsed" \
+      "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "${HIGH_SCRUTINY_TRIGGERED:-false}" \
+      "$(printf '%s' "${HIGH_SCRUTINY_MODE:-peer}" | json_escape)" \
+      "$(printf '%s' "${HIGH_SCRUTINY_REASON:-}" | json_escape)" \
+      "$findings" "$REVIEW_FALLBACK_ATTEMPTED" \
+      "$(printf '%s' "${REVIEW_FALLBACK_PRIMARY_PROVIDER:-}" | json_escape)" \
+      "$(printf '%s' "${REVIEW_FALLBACK_RETRY_PROVIDER:-}" | json_escape)" \
+      "$(printf '%s' "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-}" | json_escape)" \
+      "$(printf '%s' "${REVIEW_FALLBACK_REASON:-}" | json_escape)" \
+      "$REVIEW_EXIT_REASON" "$elapsed" \
       >"$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
   fi
 }
@@ -2933,7 +3946,8 @@ fi
 # --------------------------------------------------------------------------
 # Branded UI — double-rail verdicts signed "touchstone".
 # Mirrors lib/ui.sh; kept inline so this hook stays self-contained when
-# synced into downstream projects as scripts/codex-review.sh.
+# synced into downstream projects as scripts/conductor-review.sh, with
+# scripts/codex-review.sh retained as the legacy compatibility path.
 # --------------------------------------------------------------------------
 
 TK_BRAND_ORANGE="#FF6B35"
@@ -3028,6 +4042,14 @@ print_banner() {
   BANNER_PRINTED=true
 }
 
+if ! run_conductor_route_preflight; then
+  REVIEW_EXIT_REASON="provider-unavailable"
+  REVIEW_FINDINGS_COUNT=0
+  DIFF_LINE_COUNT="$ROUTING_DIFF_LINE_COUNT"
+  print_summary
+  handle_error "provider unavailable: route preflight"
+fi
+
 # --------------------------------------------------------------------------
 # Issue #163: prepend a verification checkpoint when this branch already
 # has a recorded BLOCKED review whose HEAD is an ancestor of current HEAD.
@@ -3044,13 +4066,29 @@ ${REVIEW_PROMPT}"
 fi
 
 for iter in $(seq 1 "$MAX_ITERATIONS"); do
+  REVIEW_FIX_ATTEMPTED=false
   phase "loading diff"
   DIFF_LINE_COUNT="$(git diff "$MERGE_BASE"..HEAD | wc -l | tr -d ' ')"
   if [ "$DIFF_LINE_COUNT" -gt "$MAX_DIFF_LINES" ]; then
-    echo "==> Diff is $DIFF_LINE_COUNT lines (> $MAX_DIFF_LINES cap) — skipping review."
-    echo "    Override with: CODEX_REVIEW_MAX_DIFF_LINES=100000 git push"
-    log_skip_event other "diff-too-large:${DIFF_LINE_COUNT}>${MAX_DIFF_LINES}"
-    exit 0
+    if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}"; then
+      echo "==> Diff is $DIFF_LINE_COUNT lines (> $MAX_DIFF_LINES cap)."
+      echo "==> Running scoped project-owned review: $SCOPED_LARGE_DIFF_LINES lines across $SCOPED_LARGE_DIFF_INCLUDED_COUNT file(s); excluded $SCOPED_LARGE_DIFF_EXCLUDED_COUNT trusted Touchstone-managed file(s)."
+      DIFF_LINE_COUNT="$SCOPED_LARGE_DIFF_LINES"
+    elif is_truthy "${SCOPED_LARGE_DIFF_SYNC_ONLY:-false}"; then
+      echo "==> Diff is $DIFF_LINE_COUNT lines (> $MAX_DIFF_LINES cap), but all changed paths are trusted Touchstone-managed sync files."
+      echo "==> Skipping AI review for managed sync-only diff."
+      log_skip_event other "diff-too-large-managed-sync-only:${DIFF_LINE_COUNT}>${MAX_DIFF_LINES}"
+      exit 0
+    else
+      echo "==> Diff is $DIFF_LINE_COUNT lines (> $MAX_DIFF_LINES cap) — skipping review."
+      echo "    Override with: CODEX_REVIEW_MAX_DIFF_LINES=100000 git push"
+      if [ "$ON_ERROR" = "fail-closed" ]; then
+        REVIEW_EXIT_REASON="error"
+        handle_error "diff too large:${DIFF_LINE_COUNT}>${MAX_DIFF_LINES}"
+      fi
+      log_skip_event other "diff-too-large:${DIFF_LINE_COUNT}>${MAX_DIFF_LINES}"
+      exit 0
+    fi
   fi
 
   phase "checking cache"
@@ -3072,6 +4110,8 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   printf "  ${C_DIM}iteration ${iter}/${MAX_ITERATIONS} · ${DIFF_LINE_COUNT} lines vs ${BASE}${C_RESET}\n"
   phase "reviewing with $REVIEWER_LABEL"
 
+  REVIEW_ATTEMPT_HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  REVIEW_ATTEMPT_STATUS_BEFORE="$(git status --porcelain)"
   set +e
   run_reviewer_with_timeout "$REVIEW_TIMEOUT"
   EXIT=$?
@@ -3096,12 +4136,14 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   # Check worktree invariants in non-fix modes.
   # This is a hard failure regardless of on_error policy — a reviewer that
   # mutates the worktree in review-only mode is a safety violation.
-  if ! mode_allows_fix; then
-    if ! check_worktree_invariants; then
-      REVIEW_EXIT_REASON="worktree-mutated"
-      print_summary
-      echo "==> ERROR: Worktree was mutated in '$REVIEW_MODE' mode — blocking push." >&2
-      exit 1
+  block_if_worktree_mutated_in_review_mode
+
+  if [ "$EXIT" -eq 124 ]; then
+    if try_review_fallback_retry "timeout after ${REVIEW_TIMEOUT}s" "$REVIEW_ATTEMPT_HEAD_BEFORE" "$REVIEW_ATTEMPT_STATUS_BEFORE"; then
+      EXIT="$FALLBACK_REVIEW_EXIT"
+      OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
+      print_route_log
+      block_if_worktree_mutated_in_review_mode
     fi
   fi
 
@@ -3111,6 +4153,15 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     REVIEW_EXIT_REASON="timeout"
     print_summary
     handle_error "timeout after ${REVIEW_TIMEOUT}s"
+  fi
+
+  if [ $EXIT -ne 0 ]; then
+    if try_review_fallback_retry "reviewer exit $EXIT" "$REVIEW_ATTEMPT_HEAD_BEFORE" "$REVIEW_ATTEMPT_STATUS_BEFORE"; then
+      EXIT="$FALLBACK_REVIEW_EXIT"
+      OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
+      print_route_log
+      block_if_worktree_mutated_in_review_mode
+    fi
   fi
 
   if [ $EXIT -ne 0 ]; then
@@ -3134,14 +4185,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         EXIT="$ASSIST_EXIT"
         OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
 
-        if ! mode_allows_fix; then
-          if ! check_worktree_invariants; then
-            REVIEW_EXIT_REASON="worktree-mutated"
-            print_summary
-            echo "==> ERROR: Worktree was mutated in '$REVIEW_MODE' mode — blocking push." >&2
-            exit 1
-          fi
-        fi
+        block_if_worktree_mutated_in_review_mode
 
         if [ "$EXIT" -eq 124 ]; then
           phase "timed out"
@@ -3163,7 +4207,42 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
     fi
   fi
 
-  LAST_SENTINEL="$(printf '%s\n' "$OUTPUT" | extract_review_sentinel)"
+  while :; do
+    LAST_SENTINEL="$(printf '%s\n' "$OUTPUT" | extract_review_sentinel)"
+    case "$LAST_SENTINEL" in
+      CODEX_REVIEW_CLEAN | CODEX_REVIEW_FIXED | CODEX_REVIEW_BLOCKED) break ;;
+    esac
+
+    LAST_LINE="$(printf '%s\n' "$OUTPUT" | awk 'NF { line = $0 } END { print line }' | tr -d '\r')"
+    if try_review_fallback_retry "malformed sentinel" "$REVIEW_ATTEMPT_HEAD_BEFORE" "$REVIEW_ATTEMPT_STATUS_BEFORE"; then
+      EXIT="$FALLBACK_REVIEW_EXIT"
+      OUTPUT="$(cat "$REVIEW_OUTPUT_FILE" 2>/dev/null || true)"
+      print_route_log
+      block_if_worktree_mutated_in_review_mode
+
+      if [ "$EXIT" -eq 124 ]; then
+        phase "timed out"
+        echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s during fallback retry."
+        REVIEW_EXIT_REASON="timeout"
+        print_summary
+        handle_error "timeout after ${REVIEW_TIMEOUT}s during fallback retry"
+      fi
+
+      if [ "$EXIT" -ne 0 ]; then
+        echo "==> $REVIEWER_LABEL fallback review failed with exit $EXIT."
+        REVIEW_EXIT_REASON="error"
+        print_summary
+        handle_error "reviewer exit $EXIT during fallback retry"
+      fi
+      continue
+    fi
+    break
+  done
+
+  if [ "$LAST_SENTINEL" = "CODEX_REVIEW_BLOCKED" ] && mode_allows_fix; then
+    run_fix_phase_for_blocked_review "$OUTPUT" || true
+  fi
+
   case "$LAST_SENTINEL" in
     CODEX_REVIEW_CLEAN)
       phase "done — clean"
@@ -3209,7 +4288,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
       DISALLOWED_AUTOFIX_PATHS="$(disallowed_autofix_paths "$AUTOFIX_CHANGED_PATHS")"
       if [ -n "$DISALLOWED_AUTOFIX_PATHS" ]; then
-        echo "==> $REVIEWER_LABEL edited paths that are not allowed by .codex-review.toml."
+        echo "==> $REVIEWER_LABEL edited paths that are not allowed by ${CONFIG_DISPLAY_NAME:-.touchstone-review.toml}."
         echo "    Refusing to auto-commit. Review these changes manually:"
         printf '%s\n' "$DISALLOWED_AUTOFIX_PATHS" | sed 's/^/    - /'
         echo "    Inspect the working-tree diff before deciding whether to keep or discard them."
@@ -3225,6 +4304,9 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       git commit -m "fix: address $REVIEWER_LABEL review findings (auto, $REVIEW_MODE, iter $iter)"
       append_findings_history_event "CODEX_REVIEW_FIXED" "$iter" "$OUTPUT" 0
       WORKTREE_DIRTY_BEFORE_REVIEW=false
+      WORKTREE_HEAD_BEFORE="$(git rev-parse HEAD)"
+      WORKTREE_BRANCH_BEFORE="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'detached')"
+      WORKTREE_STATUS_BEFORE="$(git status --porcelain)"
       FIX_COMMITS=$((FIX_COMMITS + 1))
       echo "==> Created fix commit $(git rev-parse --short HEAD). Re-running review on new HEAD..."
       echo ""

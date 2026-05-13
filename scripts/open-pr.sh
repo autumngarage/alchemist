@@ -42,8 +42,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_SYNC_GUARD="$SCRIPT_DIR/../lib/script-sync-guard.sh"
+if [ -f "$SCRIPT_SYNC_GUARD" ]; then
+  # shellcheck source=../lib/script-sync-guard.sh
+  source "$SCRIPT_SYNC_GUARD"
+  touchstone_script_sync_guard "$0" "$@"
+fi
 PREFLIGHT_SCRIPT="$SCRIPT_DIR/../lib/preflight.sh"
 REVIEW_COMMENT_SCRIPT="$SCRIPT_DIR/../lib/review-comment.sh"
+ISSUE_CLAIM_CHECK_SCRIPT="$SCRIPT_DIR/issue-claim-check.sh"
 if [ -f "$SCRIPT_DIR/../lib/events.sh" ]; then
   # shellcheck source=../lib/events.sh
   source "$SCRIPT_DIR/../lib/events.sh"
@@ -121,6 +128,66 @@ verify_pr_merged() {
   return 1
 }
 
+run_issue_claim_preflight() {
+  local label="$1"
+  shift
+
+  if [ ! -f "$ISSUE_CLAIM_CHECK_SCRIPT" ]; then
+    echo "ERROR: issue-claim-check.sh not found at $ISSUE_CLAIM_CHECK_SCRIPT." >&2
+    echo "       Run touchstone update so scripts/open-pr.sh and its helpers stay in sync." >&2
+    exit 2
+  fi
+
+  echo "==> Running local issue claim preflight ($label) ..."
+  bash "$ISSUE_CLAIM_CHECK_SCRIPT" "$@"
+}
+
+find_pr_body_protocol_checker() {
+  local rel
+
+  for rel in scripts/check-api-boundary-protocol.py scripts/check-pr-body-protocol.py; do
+    if [ -f "$REPO_ROOT/$rel" ]; then
+      printf '%s\n' "$REPO_ROOT/$rel"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+run_pr_body_protocol_preflight() {
+  local label="$1" pr_number="$2"
+  local checker body checker_rel rc
+
+  checker="$(find_pr_body_protocol_checker)" || return 0
+  checker_rel="${checker#"$REPO_ROOT/"}"
+
+  if ! body="$(gh pr view "$pr_number" --json body --jq '.body // ""' 2>/dev/null)"; then
+    echo "ERROR: failed to read PR #$pr_number body for protocol preflight." >&2
+    exit 1
+  fi
+
+  echo "==> Running PR body protocol preflight ($label): $checker_rel"
+  rc=0
+  if [ -x "$checker" ]; then
+    API_BOUNDARY_PR_BODY="$body" PR_BODY="$body" "$checker" || rc=$?
+  elif [ "${checker##*.}" = "py" ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "ERROR: $checker_rel requires python3, but python3 was not found." >&2
+      exit 1
+    fi
+    API_BOUNDARY_PR_BODY="$body" PR_BODY="$body" python3 "$checker" || rc=$?
+  else
+    API_BOUNDARY_PR_BODY="$body" PR_BODY="$body" bash "$checker" || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    echo "ERROR: PR body protocol preflight failed for PR #$pr_number." >&2
+    echo "       Edit the PR body, then rerun: bash scripts/open-pr.sh --auto-merge" >&2
+    exit "$rc"
+  fi
+}
+
 truthy() {
   case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
     true | 1 | yes | on) return 0 ;;
@@ -138,7 +205,14 @@ normalize_bool() {
 
 load_open_pr_review_config() {
   local config_file
-  config_file="$(git rev-parse --show-toplevel 2>/dev/null)/.codex-review.toml"
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$repo_root" ] || return 0
+  if [ -f "$repo_root/.touchstone-review.toml" ]; then
+    config_file="$repo_root/.touchstone-review.toml"
+  else
+    config_file="$repo_root/.codex-review.toml"
+  fi
   [ -f "$config_file" ] || return 0
   [ -f "$SCRIPT_DIR/../lib/toml.sh" ] || return 0
 
@@ -193,10 +267,13 @@ run_advisory_review_at_pr_open() {
     echo "==> Preflight disabled before advisory review."
   fi
 
-  review_script="$SCRIPT_DIR/codex-review.sh"
+  review_script="$SCRIPT_DIR/conductor-review.sh"
   if [ ! -f "$review_script" ]; then
-    echo "WARNING: codex-review.sh not found at $review_script; skipping advisory review." >&2
-    return 0
+    review_script="$SCRIPT_DIR/codex-review.sh"
+    if [ ! -f "$review_script" ]; then
+      echo "WARNING: conductor review script not found at $SCRIPT_DIR/conductor-review.sh or $SCRIPT_DIR/codex-review.sh; skipping advisory review." >&2
+      return 0
+    fi
   fi
 
   summary_file="$(git rev-parse --git-path "touchstone/review-summary-pr-${pr_number}-advisory.json" 2>/dev/null || echo "")"
@@ -307,7 +384,7 @@ find_issue_closing_refs() {
     {
       line = tolower($0)
       should_scan = 0
-      if (line ~ /^[[:space:]]*(closes-issue|closes|fixes|refs):[[:space:]]*/) {
+      if (line ~ /^[[:space:]]*(closes-issue|closes|fixes|resolves):[[:space:]]*/) {
         should_scan = 1
       }
       if (line ~ /(^|[^[:alnum:]_-])(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+/) {
@@ -467,6 +544,8 @@ if [ -n "$EXISTING_PR_URL" ]; then
     PR_NUMBER="$(basename "$EXISTING_PR_URL")"
     ORPHAN_PR_URL="$EXISTING_PR_URL"
     ORPHAN_PR_NUMBER="$PR_NUMBER"
+    run_issue_claim_preflight "existing PR #$PR_NUMBER" --pr-number "$PR_NUMBER"
+    run_pr_body_protocol_preflight "existing PR #$PR_NUMBER" "$PR_NUMBER"
     MERGE_SCRIPT="$SCRIPT_DIR/merge-pr.sh"
     if [ ! -f "$MERGE_SCRIPT" ]; then
       echo "ERROR: merge-pr.sh not found at $MERGE_SCRIPT — cannot auto-merge." >&2
@@ -574,6 +653,8 @@ BODY_FILE="$(mktemp -t touchstone-pr-body.XXXXXX.md)"
   fi
 } >"$BODY_FILE"
 
+run_issue_claim_preflight "new PR body" --body-file "$BODY_FILE"
+
 echo "==> Opening PR against $BASE_BRANCH ..."
 if [ -n "$DRAFT_FLAG" ]; then
   PR_URL="$(gh pr create --base "$BASE_BRANCH" --title "$TITLE" --body-file "$BODY_FILE" --draft)"
@@ -595,6 +676,7 @@ touchstone_emit_event pr_opened \
   base_branch="$BASE_BRANCH" \
   head_sha="$HEAD_SHA"
 
+run_pr_body_protocol_preflight "new PR #$ORPHAN_PR_NUMBER" "$ORPHAN_PR_NUMBER"
 run_advisory_review_at_pr_open "$ORPHAN_PR_NUMBER" "$BASE_BRANCH"
 
 if [ -n "$DRAFT_FLAG" ]; then
