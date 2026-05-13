@@ -1,7 +1,7 @@
-"""Issue scanner — finds labelled issues across all repos in an org.
+"""Issue scanner — finds open issues across all repos in an org.
 
 Single GitHub search query:
-`gh search issues --owner <org> --label <label> --state open --archived=false`.
+`gh search issues --owner <org> --state open --archived=false`.
 Returns matching issues across every active repo in the org. Auto-picks-up new
 repos, auto-drops archived ones. The org is the unit of scoping.
 """
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DispatchIssue:
-    """A GitHub issue tagged for alchemist dispatch."""
+    """A GitHub issue returned by the org-wide open-issue scan."""
 
     number: int
     title: str
@@ -33,7 +33,7 @@ class ScanError(RuntimeError):
 def scan(
     *,
     org: str,
-    label: str,
+    label: str = "",
     limit: int = 1000,
     gh_bin: str = "gh",
     extra_args: tuple[str, ...] = (),
@@ -48,13 +48,14 @@ def scan(
     cmd: list[str] = [
         gh_bin, "search", "issues",
         "--owner", org,
-        "--label", label,
         "--state", "open",
         "--archived=false",
         "--limit", str(limit),
         "--json", "number,title,body,url,repository,updatedAt,labels",
-        *extra_args,
     ]
+    if label:
+        cmd.extend(["--label", label])
+    cmd.extend(extra_args)
     try:
         result = subprocess.run(  # noqa: S603 — gh args are constructed from validated config
             cmd,

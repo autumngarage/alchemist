@@ -59,6 +59,7 @@ _PR_TITLE_PREFIX = "[alchemist]"
 _MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 _STUCK_SWEEP_MARGIN_SEC = 10 * 60
 _TARGET_DEP_PREP_TIMEOUT_SEC = 10 * 60
+_SKIP_LABEL = "alchemist-skip"
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
@@ -111,10 +112,21 @@ def run_tick(config: Config) -> list[RunResult]:
     remaining_issue_budget = max(0, config.max_issues_per_tick - len(sweep_results))
 
     try:
-        issues = scan(org=config.org, label=config.dispatch_label)
+        issues = scan(org=config.org)
     except Exception as exc:  # noqa: BLE001 — surface any scanner failure to operator
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
         return [*sweep_results, _run_level_error(config, f"scan: {exc}")]
+
+    state_labels = {
+        label.lower()
+        for label in _state_labels(config.dispatch_label)
+        if label != config.dispatch_label
+    }
+    ignored_labels = {*state_labels, _SKIP_LABEL}
+    issues = [
+        i for i in issues
+        if {label.lower() for label in i.labels}.isdisjoint(ignored_labels)
+    ]
 
     if config.repo_blocklist:
         skipped = [i for i in issues if i.repository in config.repo_blocklist]
@@ -266,6 +278,15 @@ def _process_locked(
             _set_label(repo, issue.number, _working_label(config.dispatch_label), config)
         except _GhError as exc:
             return _result(repo, issue.number, started, config, error=f"label-transition: {exc}")
+        _post_activity_comment(repo, issue.number, _pickup_comment_body(), config)
+        if _should_set_assignee(config):
+            try:
+                _set_assignee(repo, issue.number, "add", config.assignee_user, config)
+            except _GhError as exc:
+                print(
+                    f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
+                    file=sys.stderr,
+                )
 
     try:
         conductor_timeout_sec = _conductor_timeout_for_issue(issue, config)
@@ -296,27 +317,6 @@ def _process_locked(
             config, "target-dependencies", str(exc), repo_context=repo, issue_number=issue.number
         )
         return _bail(repo, issue, started, config, f"dependency-prepare: {exc}")
-
-    # Claim the issue (alchemist#23): assign + post a "starting work" comment
-    # so the audit trail is visible, not just the -working label transition.
-    # Assignee failure is non-fatal: log + continue. The comment is the backup.
-    # GitHub App installation tokens cannot assign users, so App-auth
-    # deployments skip assignment and rely on the comment for visibility.
-    if not config.dry_run:
-        if _should_set_assignee(config):
-            try:
-                _set_assignee(repo, issue.number, "add", config.assignee_user, config)
-            except _GhError as exc:
-                print(
-                    f"alchemist: warning — could not assign {config.assignee_user}: {exc}",
-                    file=sys.stderr,
-                )
-        _post_activity_comment(
-            repo,
-            issue.number,
-            _claim_comment_body(branch, config.default_provider, conductor_timeout_sec, config),
-            config,
-        )
 
     brief_path = config.state_dir / "briefs" / f"{repo.replace('/', '-')}-{issue.number}.md"
     brief_path.parent.mkdir(parents=True, exist_ok=True)
@@ -431,8 +431,9 @@ def _process_locked(
 
     if merged:
         _post_activity_comment(
-            repo, issue.number,
-            f"alchemist: shipped — see {pr_url}",
+            repo,
+            issue.number,
+            f"✅ alchemist shipped — see {pr_url}",
             config,
         )
         shipped_label_error = None
@@ -441,11 +442,41 @@ def _process_locked(
         except _GhError as exc:
             shipped_label_error = f"label-transition: {exc}"
             print(f"alchemist: {repo}#{issue.number}: {shipped_label_error}", file=sys.stderr)
+        return _result(
+            repo,
+            issue.number,
+            started,
+            config,
+            pr_url=pr_url,
+            merged=True,
+            error=shipped_label_error,
+        )
+
+    blocked_label_error = None
+    _post_activity_comment(
+        repo,
+        issue.number,
+        (
+            f"⏸ alchemist opened {pr_url} but Touchstone blocked the merge.\n"
+            "Awaiting human triage. Remove the `alchemist-blocked` label after\n"
+            "you address the review."
+        ),
+        config,
+    )
+    try:
+        _set_label(repo, issue.number, _blocked_label(config.dispatch_label), config)
+    except _GhError as exc:
+        blocked_label_error = f"label-transition: {exc}"
+        print(f"alchemist: {repo}#{issue.number}: {blocked_label_error}", file=sys.stderr)
 
     return _result(
-        repo, issue.number, started, config,
-        pr_url=pr_url, merged=merged,
-        error=shipped_label_error if merged else None,
+        repo,
+        issue.number,
+        started,
+        config,
+        pr_url=pr_url,
+        merged=False,
+        error=blocked_label_error,
     )
 
 
@@ -541,44 +572,50 @@ def _parse_duration_seconds(raw: str) -> int:
     return amount * multiplier
 
 
-def _claim_comment_body(
-    branch: str, provider: str, conductor_timeout_sec: int, config: Config
-) -> str:
-    lines = [
-        "alchemist: claiming this issue",
-        f"- branch: `{branch}`",
-        f"- provider: `{provider}`",
-    ]
-    if conductor_timeout_sec != config.conductor_timeout_sec:
-        lines.append(f"- conductor timeout: `{conductor_timeout_sec}s`")
-    return "\n".join(lines)
+def _pickup_comment_body() -> str:
+    started = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        "🧪 alchemist picked this up.\n\n"
+        "- Worker: autumn-alchemist[bot]\n"
+        f"- Started: {started}\n"
+        "- Next: Conductor agent runs, then a PR opens "
+        "(linked here automatically via \"Closes #N\")\n\n"
+        "If you want alchemist to drop this, remove the `alchemist-working` label\n"
+        "or close the issue. Alchemist will not pick the issue up again on its own."
+    )
+
+
+def _label_prefix(dispatch: str) -> str:
+    return dispatch.removesuffix("-dispatch")
+
+
+def _derived_label(dispatch: str, suffix: str) -> str:
+    return f"{_label_prefix(dispatch)}-{suffix}"
 
 
 def _working_label(dispatch: str) -> tuple[str, str]:
     """Return (remove, add) for the dispatch → working transition."""
-    add = dispatch.replace("-dispatch", "-working").replace("-test", "-test-working")
-    return dispatch, add
+    return dispatch, _derived_label(dispatch, "working")
+
+
+def _blocked_label(dispatch: str) -> tuple[str, str]:
+    """Return (remove, add) for working → blocked."""
+    return _working_label(dispatch)[1], _derived_label(dispatch, "blocked")
 
 
 def _shipped_label(dispatch: str) -> tuple[str, str]:
     """Return (remove, add) for working → shipped."""
-    working = _working_label(dispatch)[1]
-    add = dispatch.replace("-dispatch", "-shipped").replace("-test", "-test-shipped")
-    return working, add
+    return _working_label(dispatch)[1], _derived_label(dispatch, "shipped")
 
 
 def _declined_label(dispatch: str) -> tuple[str, str]:
     """Return (remove, add) for any → declined."""
-    working = _working_label(dispatch)[1]
-    add = dispatch.replace("-dispatch", "-declined").replace("-test", "-test-declined")
-    return working, add
+    return _working_label(dispatch)[1], _derived_label(dispatch, "declined")
 
 
 def _error_label(dispatch: str) -> tuple[str, str]:
     """Return (remove, add) for any → error."""
-    working = _working_label(dispatch)[1]
-    add = dispatch.replace("-dispatch", "-error").replace("-test", "-test-error")
-    return working, add
+    return _working_label(dispatch)[1], _derived_label(dispatch, "error")
 
 
 def _state_labels(dispatch_label: str) -> tuple[str, ...]:
@@ -586,6 +623,7 @@ def _state_labels(dispatch_label: str) -> tuple[str, ...]:
     return (
         dispatch_label,
         _working_label(dispatch_label)[1],
+        _blocked_label(dispatch_label)[1],
         _shipped_label(dispatch_label)[1],
         _declined_label(dispatch_label)[1],
         _error_label(dispatch_label)[1],
@@ -593,10 +631,9 @@ def _state_labels(dispatch_label: str) -> tuple[str, ...]:
 
 
 _LABEL_PALETTE: tuple[tuple[str, str, str], ...] = (
-    # (suffix-key, color, description). The first row is the bare dispatch
-    # label; the next four are the state-machine successors derived from it.
-    ("base",     "ffd787", "Dispatched to Alchemist for transmutation"),
+    # (suffix-key, color, description) for the state-machine labels.
     ("working",  "fff5d7", "Alchemist actively working"),
+    ("blocked",  "cfd7ff", "Alchemist PR blocked by Touchstone review"),
     ("shipped",  "d7ffd7", "Alchemist shipped a PR"),
     ("declined", "d7d7ff", "Alchemist reviewed and declined to make changes"),
     ("error",    "ffd7d7", "Alchemist hit an error"),
@@ -604,16 +641,14 @@ _LABEL_PALETTE: tuple[tuple[str, str, str], ...] = (
 
 
 def _expected_labels(dispatch_label: str) -> dict[str, tuple[str, str]]:
-    """Return {label_name: (color, description)} for the five labels alchemist
+    """Return {label_name: (color, description)} for the labels alchemist
     needs on every watched repo."""
-    base = dispatch_label
-    working = _working_label(dispatch_label)[1]
-    shipped = _shipped_label(dispatch_label)[1]
-    declined = _declined_label(dispatch_label)[1]
-    error = _error_label(dispatch_label)[1]
     names = {
-        "base": base, "working": working, "shipped": shipped,
-        "declined": declined, "error": error,
+        "working": _working_label(dispatch_label)[1],
+        "blocked": _blocked_label(dispatch_label)[1],
+        "shipped": _shipped_label(dispatch_label)[1],
+        "declined": _declined_label(dispatch_label)[1],
+        "error": _error_label(dispatch_label)[1],
     }
     return {
         names[key]: (color, desc)
@@ -622,12 +657,12 @@ def _expected_labels(dispatch_label: str) -> dict[str, tuple[str, str]]:
 
 
 def _ensure_labels(repo: str, dispatch_label: str) -> None:
-    """Idempotently create alchemist's expected label set on `repo`.
+    """Idempotently create alchemist's expected state-label set on `repo`.
 
-    Removes the manual-setup cliff for new operators (alchemist#19): the four
-    labels alchemist transitions between (`<base>`, `-working`, `-shipped`,
-    `-error`) must exist on the target repo or `gh issue edit --add-label`
-    silently fails and the dispatch label gets stripped without a successor.
+    Removes the manual-setup cliff for new operators (alchemist#19): alchemist
+    transitions among `-working`, `-blocked`, `-shipped`, `-declined`, and
+    `-error`. These labels must exist on the target repo or `gh issue edit
+    --add-label` silently fails.
 
     `gh label create --force` is idempotent at the gh level: if the label
     already exists with the same color/description, it's a no-op; if it
@@ -1780,11 +1815,19 @@ def _post_error_comment(
     *,
     branch: str | None = None,
 ) -> None:
-    """Backwards-compat shim around _post_activity_comment for the bail path."""
-    message = _message_with_transcript_tail(message, config)
-    if branch:
-        message = f"{message}\n\nworking branch: `{branch}`"
-    _post_activity_comment(repo, issue_number, f"alchemist: {message}", config)
+    """Post a uniform error outcome comment for bail/error transitions."""
+    reason = _message_with_transcript_tail(message, config)
+    branch_text = branch or "(unknown)"
+    _post_activity_comment(
+        repo,
+        issue_number,
+        (
+            f"⚠️ alchemist hit an error: {reason}\n\n"
+            f"Working branch: {branch_text}\n"
+            "Inspect the branch or remove the `alchemist-error` label to retry."
+        ),
+        config,
+    )
 
 
 def _set_assignee(
@@ -1883,35 +1926,25 @@ def _bail(
 def _decline(
     repo: str, issue: DispatchIssue, started: float, config: Config, message: str,
 ) -> RunResult:
-    """Decline path: the LLM correctly judged the issue non-actionable.
-
-    Distinct from `_bail` (which is for tool failures): the agent did its
-    job by recognizing the issue as not-a-fix-target and exiting cleanly.
-    Comment frames it as a deliberate decline, label transitions to
-    `<dispatch>-declined` (not `-error`), so the audit trail is honest.
-    """
+    """Decline path: the LLM correctly judged the issue non-actionable."""
     label_error: str | None = None
     if not config.dry_run:
         _post_activity_comment(
-            repo, issue.number,
-            f"alchemist: declined — {message}\n\n"
-            "The agent reviewed this issue and judged it non-actionable as a "
-            "code change. To retry, address the underlying ambiguity (sharpen "
-            "the ask, link a code path, narrow scope) and re-label "
-            f"`{config.dispatch_label}`.",
+            repo,
+            issue.number,
+            f"🚫 alchemist read this and declined: {message}",
             config,
         )
         try:
             _set_label(
-                repo, issue.number,
+                repo,
+                issue.number,
                 _declined_label(config.dispatch_label),
                 config,
             )
         except _GhError as exc:
             label_error = f"label-transition: {exc}"
             print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
-    # Keep error= populated so logs surface it; cli.py's benign_prefixes
-    # already includes "conductor produced no diff" so the process exits 0.
     if label_error:
         return _result(
             repo,

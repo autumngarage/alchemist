@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -425,8 +426,7 @@ def test_issue_body_conductor_timeout_override_reaches_conductor(
     assert results[0].error is None
     assert seen_timeouts == [1500]
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    claim_body = next(body for body in bodies if "claiming this issue" in body)
-    assert "conductor timeout: `1500s`" in claim_body
+    assert any("picked this up" in body for body in bodies)
 
 
 def test_invalid_conductor_timeout_override_bails_before_conductor(
@@ -536,7 +536,7 @@ def test_dependency_prepare_failure_bails_before_conductor_and_pr(
     assert captured["pr_creates"] == []
 
 
-def test_merge_blocked_leaves_pr_open_for_human_triage(
+def test_merge_blocked_sets_blocked_label_and_posts_comment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     captured = _stub_all_external(monkeypatch, merge_outcome="blocked")
@@ -548,8 +548,16 @@ def test_merge_blocked_leaves_pr_open_for_human_triage(
     r = results[0]
     assert r.error is None
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
-    assert r.merged is False  # touchstone blocked the merge; PR stays open
+    assert r.merged is False
     assert len(captured["pr_creates"]) == 1
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-blocked" in labels_added
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("Touchstone blocked the merge" in b for b in bodies)
 
 
 def test_merge_preflight_failure_is_fatal_with_pr_url(
@@ -707,13 +715,13 @@ def test_ensure_labels_creates_declined_label(monkeypatch: pytest.MonkeyPatch):
 
     label_names = [cmd[cmd.index("create") + 1] for cmd in calls if "label" in cmd]
     assert "alchemist-test-declined" in label_names
-    # Now five expected labels (added 'declined' to the original four).
+    assert "alchemist-test-blocked" in label_names
     assert len(label_names) == 5
 
 
 def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Repos in the blocklist are filtered out of the tick — labelled issues
-    on those repos are silently skipped, not bailed/declined."""
+    """Repos in the blocklist are filtered out of the tick — issues on those repos
+    are silently skipped, not bailed/declined."""
     issues = [
         _issue(num=1, repo="autumngarage/touchstone"),
         _issue(num=2, repo="autumngarage/vesper"),  # blocklisted
@@ -734,29 +742,46 @@ def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 @pytest.mark.parametrize("stale_label", ["alchemist-test-error", "alchemist-test-declined"])
-def test_working_transition_removes_stale_state_labels_on_retry(
+def test_state_label_filter_dispatches_only_unlabeled_issues(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_label: str
 ):
-    issue = _issue(num=7, repo="autumngarage/touchstone")
-    issue = DispatchIssue(
-        number=issue.number,
-        title=issue.title,
-        body=issue.body,
-        url=issue.url,
-        repository=issue.repository,
-        updated_at=issue.updated_at,
-        labels=("alchemist-test", stale_label),
-    )
-    captured = _stub_all_external(monkeypatch, issues=[issue])
-    config = _config(tmp_path, dry_run=False)
+    issues = [
+        _issue(num=1, repo="autumngarage/touchstone"),
+        DispatchIssue(
+            number=2,
+            title="Already being worked",
+            body="",
+            url="https://github.com/autumngarage/touchstone/issues/2",
+            repository="autumngarage/touchstone",
+            updated_at="2026-05-06T22:00:00Z",
+            labels=("alchemist-test-working",),
+        ),
+        DispatchIssue(
+            number=3,
+            title="Operator opted out",
+            body="",
+            url="https://github.com/autumngarage/touchstone/issues/3",
+            repository="autumngarage/touchstone",
+            updated_at="2026-05-06T23:00:00Z",
+            labels=("alchemist-skip",),
+        ),
+        DispatchIssue(
+            number=4,
+            title=f"Carries a stale {stale_label}",
+            body="",
+            url="https://github.com/autumngarage/touchstone/issues/4",
+            repository="autumngarage/touchstone",
+            updated_at="2026-05-06T23:30:00Z",
+            labels=(stale_label,),
+        ),
+    ]
+    captured = _stub_all_external(monkeypatch, issues=issues)
+    config = _config(tmp_path, dry_run=True, max_issues=10)
 
-    run_tick(config)
+    results = run_tick(config)
 
-    first_transition = captured["label_transitions"][0]
-    assert first_transition[first_transition.index("--add-label") + 1] == "alchemist-test-working"
-    removed = first_transition[first_transition.index("--remove-label") + 1].split(",")
-    assert "alchemist-test" in removed
-    assert stale_label in removed
+    assert [r.issue_number for r in results] == [1]
+    assert captured["pr_creates"] == []
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -1081,7 +1106,7 @@ def test_pr_create_failure_reports_working_branch_visibility(
     assert results[0].branch is not None
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
     error_body = next(body for body in bodies if "pr-create:" in body)
-    assert f"working branch: `{results[0].branch}`" in error_body
+    assert f"Working branch: {results[0].branch}" in error_body
 
 
 # --------------------------------------------------------------------------- #
@@ -1113,8 +1138,8 @@ def test_ensure_labels_creates_all_five_expected(monkeypatch: pytest.MonkeyPatch
 
     label_names = [cmd[cmd.index("create") + 1] for cmd in calls if "label" in cmd]
     assert sorted(label_names) == sorted([
-        "alchemist-test",
         "alchemist-test-working",
+        "alchemist-test-blocked",
         "alchemist-test-shipped",
         "alchemist-test-declined",
         "alchemist-test-error",
@@ -1205,11 +1230,10 @@ def test_ensure_labels_runs_before_clone_in_live_mode(
 # --------------------------------------------------------------------------- #
 
 
-def test_live_run_assigns_and_comments_on_claim(
+def test_live_run_assigns_and_comments_on_pickup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    """Live run posts a 'starting work' comment + assigns the issue to the
-    configured assignee_user."""
+    """Live run posts a pickup comment + assigns the issue to the configured assignee."""
     captured = _stub_all_external(monkeypatch)
     config = _config(tmp_path, dry_run=False)
     run_tick(config)
@@ -1217,12 +1241,12 @@ def test_live_run_assigns_and_comments_on_claim(
         "--add-assignee" in cmd for cmd in captured["assignee_changes"]
     ), "expected an --add-assignee call"
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    assert any("claiming this issue" in b for b in bodies), (
-        f"expected a 'claiming' comment; got {bodies}"
-    )
+    pickup_body = next(body for body in bodies if "picked this up" in body)
+    assert "Worker: autumn-alchemist[bot]" in pickup_body
+    assert re.search(r"- Started: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", pickup_body)
 
 
-def test_app_auth_skips_assignee_but_still_comments_on_claim(
+def test_app_auth_skips_assignee_but_still_comments_on_pickup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     captured = _stub_all_external(monkeypatch)
@@ -1237,19 +1261,19 @@ def test_app_auth_skips_assignee_but_still_comments_on_claim(
 
     assert captured["assignee_changes"] == []
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    assert any("claiming this issue" in b for b in bodies), (
-        f"expected a 'claiming' comment; got {bodies}"
+    assert any("picked this up" in b for b in bodies), (
+        f"expected a pickup comment; got {bodies}"
     )
 
 
 def test_live_run_comments_on_ship(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """After successful merge, alchemist posts a 'shipped' comment with the PR url."""
+    """After successful merge, alchemist posts the shipped comment shape."""
     captured = _stub_all_external(monkeypatch)
     config = _config(tmp_path, dry_run=False)
     run_tick(config)
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    assert any("shipped" in b and "/pull/9001" in b for b in bodies), (
-        f"expected a 'shipped' comment with the PR url; got {bodies}"
+    assert any("✅ alchemist shipped — see" in b and "/pull/9001" in b for b in bodies), (
+        f"expected shipped comment with emoji + PR url; got {bodies}"
     )
 
 
@@ -1266,8 +1290,7 @@ def test_dry_run_skips_assignee_and_activity_comments(
 def test_assignee_failure_does_not_block_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    """If `gh issue edit --add-assignee` fails (e.g., user not in org), the run
-    continues. Comment claim is the backup."""
+    """If `gh issue edit --add-assignee` fails, the run still continues."""
     from alchemist import runner as _runner_mod
 
     real_set_assignee = _runner_mod._set_assignee
@@ -1275,7 +1298,6 @@ def test_assignee_failure_does_not_block_run(
     def failing_set_assignee(repo, issue_number, action, assignee, config):
         if action == "add":
             raise _runner_mod._GhError("not in org")
-        # remove-action would never fire in this test
         return real_set_assignee(repo, issue_number, action, assignee, config)
 
     monkeypatch.setattr(_runner_mod, "_set_assignee", failing_set_assignee)
@@ -1287,9 +1309,8 @@ def test_assignee_failure_does_not_block_run(
     assert r.error is None, f"assignee failure should not block the run; got error={r.error!r}"
     assert r.merged is True
     assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
-    # The comment claim still posted (backup signal) even though assign failed.
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    assert any("claiming" in b for b in bodies)
+    assert any("picked this up" in b for b in bodies)
 
 
 def test_unexpected_issue_exception_transitions_to_error(
@@ -1591,7 +1612,7 @@ def test_validate_diff_handles_corrupted_unicode_in_python(tmp_path: Path):
         "    return 'ok'\n"
         "\n"
         # The actual corruption captured in conductor#254:
-        "'} +#+#+#+#+#+assistant to=functions.Edit კომენტary 彩神争霸破解_code 大发游戏json {\n"
+        "'} +#+#+#+#+#+assistant-to-functions-Edit კომენტary 彩神争霸破解_code 大发游戏json {\n"
     )
     real_run = subprocess.run
 

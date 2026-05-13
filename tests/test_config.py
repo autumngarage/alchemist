@@ -23,7 +23,7 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
     cfg = load_config()
     assert cfg.org == "autumngarage"
-    assert cfg.dispatch_label == "alchemist-test"
+    assert cfg.dispatch_label == "alchemist"
     assert cfg.dry_run is True
     assert cfg.max_issues_per_tick == 1
     assert cfg.max_per_repo_per_tick == 1

@@ -63,6 +63,20 @@ def test_scan_invokes_gh_with_correct_args(monkeypatch: pytest.MonkeyPatch):
     assert captured["cmd"][captured["cmd"].index("--limit") + 1] == "1000"
 
 
+def test_scan_omits_label_arg_when_label_empty(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    issues = scan(org="autumngarage")
+    assert issues == []
+    assert "--label" not in captured["cmd"]
+
+
 def test_scan_accepts_explicit_limit(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
