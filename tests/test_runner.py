@@ -2291,3 +2291,21 @@ def test_check_budget_fails_open_when_cost_unknown(tmp_path: Path):
     log = tmp_path / "empty.ndjson"
     log.write_text('{"event": "route_decision"}\n')
     assert _check_budget(log, "$2") is None
+
+
+# --------------------------------------------------------------------------- #
+# Self-file external-failure suppression                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_is_external_failure_matches_502_and_bad_gateway():
+    from alchemist.runner import _is_external_failure
+
+    assert _is_external_failure("conductor: upstream HTTP 502 from provider")
+    assert _is_external_failure("openrouter.ai | 502: Bad gateway")
+
+
+def test_is_external_failure_does_not_match_plain_500():
+    from alchemist.runner import _is_external_failure
+
+    assert not _is_external_failure("conductor: upstream HTTP 500 internal server error")
