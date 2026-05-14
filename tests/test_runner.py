@@ -2201,6 +2201,66 @@ def test_sweep_stuck_skipped_in_dry_run(
     assert captured["comments"] == []
 
 
+def test_self_file_skips_benign_stuck_sweep_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from alchemist.runner import _self_file_failures
+
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    result = RunResult(
+        repo="autumngarage/touchstone",
+        issue_number=42,
+        pr_url=None,
+        merged=None,
+        error=(
+            "stuck-sweep: detected stuck `-working` state "
+            "(40 min old); transitioning to error"
+        ),
+        elapsed_sec=0.0,
+        dry_run=False,
+    )
+
+    monkeypatch.setattr(
+        "alchemist.runner._is_meta_self_issue_result",
+        lambda _result: (_ for _ in ()).throw(AssertionError("should not check meta issues")),
+    )
+    monkeypatch.setattr(
+        "alchemist.runner._self_file_failure",
+        lambda _result, _config: (_ for _ in ()).throw(AssertionError("should not self-file")),
+    )
+
+    _self_file_failures([result], _config(tmp_path, dry_run=False))
+
+
+def test_self_file_keeps_non_benign_stuck_sweep_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _self_file_failures
+
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    captured: list[RunResult] = []
+    result = RunResult(
+        repo="autumngarage/touchstone",
+        issue_number=42,
+        pr_url=None,
+        merged=None,
+        error=(
+            "stuck-sweep: detected stuck `-working` state "
+            "(40 min old); transitioning to error; label-transition: label update failed"
+        ),
+        elapsed_sec=0.0,
+        dry_run=False,
+    )
+
+    monkeypatch.setattr("alchemist.runner._is_meta_self_issue_result", lambda _result: False)
+    monkeypatch.setattr(
+        "alchemist.runner._self_file_failure",
+        lambda r, _config: captured.append(r),
+    )
+
+    _self_file_failures([result], _config(tmp_path, dry_run=False))
+
+    assert captured == [result]
+
+
 # --------------------------------------------------------------------------- #
 # Budget cap (alchemist#33)                                                   #
 # --------------------------------------------------------------------------- #
