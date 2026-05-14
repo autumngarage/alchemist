@@ -1654,6 +1654,14 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> _MergeGateRes
     """
     root = _resolve_touchstone_root()
     script = root / "scripts" / "merge-pr.sh"
+    env = {
+        **os.environ,
+        # Alchemist runs touchstone's installed merge gate from a managed
+        # checkout path (often detached HEAD). Disable script-sync guard for
+        # this invocation so merge-pr.sh does not self-update that install.
+        "TOUCHSTONE_NO_SCRIPT_SYNC": "1",
+        "TOUCHSTONE_SCRIPT_SYNC_GUARD_DISABLE": "1",
+    }
     try:
         result = subprocess.run(  # noqa: S603
             ["bash", str(script), str(pr_number)],
@@ -1662,6 +1670,7 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> _MergeGateRes
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise _ToolError(f"merge-pr.sh timeout after {timeout}s") from exc
