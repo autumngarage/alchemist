@@ -591,6 +591,66 @@ def test_run_conductor_sanitizes_transcript_tail(monkeypatch: pytest.MonkeyPatch
     assert "[redacted-token]" in str(exc_info.value)
 
 
+def test_run_conductor_subprocess_timeout_scales_with_conductor_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist.runner import _run_conductor
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+    seen_timeouts: list[int] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd
+        seen_timeouts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_conductor(
+        brief_path=brief,
+        cwd=tmp_path,
+        provider="kimi",
+        timeout=600,
+        transcript_path=transcript,
+        ndjson_path=ndjson,
+    )
+
+    assert seen_timeouts == [660]
+
+
+def test_run_conductor_subprocess_timeout_is_capped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist.runner import _run_conductor
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+    seen_timeouts: list[int] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd
+        seen_timeouts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_conductor(
+        brief_path=brief,
+        cwd=tmp_path,
+        provider="kimi",
+        timeout=3600,
+        transcript_path=transcript,
+        ndjson_path=ndjson,
+    )
+
+    assert seen_timeouts == [3720]
+
+
 def test_conductor_error_comment_uses_collapsed_details_for_tail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
