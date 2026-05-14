@@ -63,6 +63,9 @@ def _issue(num: int = 7, repo: str = "autumngarage/touchstone") -> DispatchIssue
 def _isolate_env(monkeypatch: pytest.MonkeyPatch):
     """Pretend GITHUB_TOKEN is set so doctor's auth check passes inside tests."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
+    # Most runner tests predate self-file behavior and assert only the primary
+    # issue lifecycle. Keep that loop muted by default; dedicated tests opt in.
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "1")
 
 
 def _stub_all_external(
@@ -97,6 +100,9 @@ def _stub_all_external(
         "label_creates": [],
         "assignee_changes": [],
         "activity_comments": [],
+        "meta_issue_lists": [],
+        "meta_issue_creates": [],
+        "meta_issue_comments": [],
         "remote_branch_fetches": [],
         "push_calls": [],
         "pr_creates": [],
@@ -152,8 +158,30 @@ def _stub_all_external(
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "issue" in cmd and "comment" in cmd:
-            captured["activity_comments"].append(cmd)
+            if "--repo" in cmd and cmd[cmd.index("--repo") + 1] == "autumngarage/alchemist":
+                captured["meta_issue_comments"].append(cmd)
+            else:
+                captured["activity_comments"].append(cmd)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        if (
+            "issue" in cmd and "list" in cmd
+            and "--repo" in cmd and cmd[cmd.index("--repo") + 1] == "autumngarage/alchemist"
+        ):
+            captured["meta_issue_lists"].append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
+
+        if (
+            "issue" in cmd and "create" in cmd
+            and "--repo" in cmd and cmd[cmd.index("--repo") + 1] == "autumngarage/alchemist"
+        ):
+            captured["meta_issue_creates"].append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="https://github.com/autumngarage/alchemist/issues/123\n",
+                stderr="",
+            )
 
         if "repo" in cmd and "view" in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="main\n", stderr="")
@@ -466,7 +494,104 @@ def test_conductor_timeout_override_is_bounded():
         _parse_conductor_timeout_override("alchemist-timeout: 2h")
 
 
-def test_conductor_error_comment_includes_sanitized_transcript_tail(
+def test_tail_text_returns_last_lines(tmp_path: Path):
+    from alchemist.runner import _tail_text
+
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("\n".join(f"line-{i}" for i in range(50)), encoding="utf-8")
+
+    tail = _tail_text(transcript)
+
+    assert "line-49" in tail
+    assert "line-20" in tail
+    assert "line-19" not in tail
+
+
+def test_tail_text_empty_and_missing(tmp_path: Path):
+    from alchemist.runner import _tail_text
+
+    empty = tmp_path / "empty.log"
+    empty.write_text("", encoding="utf-8")
+
+    assert _tail_text(empty) == ""
+    assert _tail_text(tmp_path / "missing.log") == ""
+
+
+def test_tail_text_truncates_to_max_chars(tmp_path: Path):
+    from alchemist.runner import _tail_text
+
+    transcript = tmp_path / "transcript.log"
+    transcript.write_text("\n".join(["x" * 50 for _ in range(10)]), encoding="utf-8")
+
+    tail = _tail_text(transcript, max_lines=30, max_chars=120)
+
+    assert len(tail) == 120
+
+
+def test_run_conductor_failure_includes_transcript_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist.runner import _run_conductor, _ToolError
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd
+        kwargs["stdout"].write("first line\n")
+        kwargs["stdout"].write("root cause line\n")
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(_ToolError) as exc_info:
+        _run_conductor(
+            brief_path=brief,
+            cwd=tmp_path,
+            provider="kimi",
+            timeout=60,
+            transcript_path=transcript,
+            ndjson_path=ndjson,
+        )
+
+    message = str(exc_info.value)
+    assert "transcript tail:" in message
+    assert "root cause line" in message
+    assert f"see {transcript}" in message
+
+
+def test_run_conductor_sanitizes_transcript_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from alchemist.runner import _run_conductor, _ToolError
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd
+        kwargs["stdout"].write("token leak ghp_xxxxxxxxxxx\n")
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(_ToolError) as exc_info:
+        _run_conductor(
+            brief_path=brief,
+            cwd=tmp_path,
+            provider="kimi",
+            timeout=60,
+            transcript_path=transcript,
+            ndjson_path=ndjson,
+        )
+
+    assert "ghp_xxxxxxxxxxx" not in str(exc_info.value)
+    assert "[redacted-token]" in str(exc_info.value)
+
+
+def test_conductor_error_comment_uses_collapsed_details_for_tail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     from alchemist.runner import _ToolError
@@ -474,13 +599,12 @@ def test_conductor_error_comment_includes_sanitized_transcript_tail(
     captured = _stub_all_external(monkeypatch)
 
     def fail_conductor(*, transcript_path: Path, **_: object) -> None:
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        transcript_path.write_text(
-            "\n".join(f"noisy line {i}" for i in range(90))
-            + "\nfinal diagnostic with token ghp_fake\n",
-            encoding="utf-8",
+        raise _ToolError(
+            "exit 2; transcript tail:\n"
+            "noisy line\n"
+            "token ghp_fake\n"
+            f"see {transcript_path}"
         )
-        raise _ToolError(f"exit 2; see {transcript_path}")
 
     monkeypatch.setattr("alchemist.runner._run_conductor", fail_conductor)
     config = _config(tmp_path, dry_run=False)
@@ -488,28 +612,15 @@ def test_conductor_error_comment_includes_sanitized_transcript_tail(
     results = run_tick(config)
 
     assert len(results) == 1
-    assert results[0].error == (
-        f"conductor: exit 2; see "
-        f"{tmp_path / 'transcripts' / 'autumngarage-touchstone-7.log'}"
-    )
-    assert captured["pr_creates"] == []
+    assert results[0].error is not None
+    assert "transcript tail:" in results[0].error
+    assert "<details>" not in results[0].error
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
-    error_body = next(body for body in bodies if "exit 2; see" in body)
-    assert "Transcript tail" in error_body
-    assert "final diagnostic with token [redacted-token]" in error_body
+    error_body = next(body for body in bodies if "exit 2" in body)
+    assert "<details>" in error_body
+    assert "<summary>Conductor transcript tail</summary>" in error_body
+    assert "[redacted-token]" in error_body
     assert "ghp_fake" not in error_body
-    assert "noisy line 0" not in error_body
-
-
-def test_transcript_tail_ignores_paths_outside_state_dir(tmp_path: Path):
-    from alchemist.runner import _message_with_transcript_tail
-
-    outside = tmp_path / "outside.log"
-    outside.write_text("do not publish this", encoding="utf-8")
-    config = _config(tmp_path)
-    message = f"conductor: exit 2; see {outside}"
-
-    assert _message_with_transcript_tail(message, config) == message
 
 
 def test_dependency_prepare_failure_bails_before_conductor_and_pr(
