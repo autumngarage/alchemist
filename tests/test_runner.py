@@ -2291,3 +2291,28 @@ def test_check_budget_fails_open_when_cost_unknown(tmp_path: Path):
     log = tmp_path / "empty.ndjson"
     log.write_text('{"event": "route_decision"}\n')
     assert _check_budget(log, "$2") is None
+
+
+# --------------------------------------------------------------------------- #
+# Self-file external failure classification (alchemist#133)                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_is_external_failure_matches_openrouter_non_json_response():
+    from alchemist.runner import _is_external_failure
+
+    assert _is_external_failure(
+        "conductor: OpenRouter response was not JSON: Expecting value"
+    )
+
+
+def test_is_external_failure_openrouter_match_is_case_insensitive():
+    from alchemist.runner import _is_external_failure
+
+    assert _is_external_failure("Conductor: openrouter response was NOT json")
+
+
+def test_is_external_failure_does_not_match_unrelated_conductor_errors():
+    from alchemist.runner import _is_external_failure
+
+    assert not _is_external_failure("conductor: exit 1; transcript tail: syntax error")
