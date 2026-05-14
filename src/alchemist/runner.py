@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -140,19 +141,22 @@ def run_tick(config: Config) -> list[RunResult]:
 
     work = _select_work(issues, config, limit=remaining_issue_budget)
 
-    if not work:
-        return sweep_results
+    results: list[RunResult] = list(sweep_results)
+    if work:
+        workers = max(1, min(config.max_concurrent_repos, len(work)))
+        if workers == 1:
+            for repo, slice_ in work:
+                results.extend(_process_repo(repo, slice_, config))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_process_repo, repo, slice_, config)
+                    for repo, slice_ in work
+                ]
+                results.extend([r for fut in futures for r in fut.result()])
 
-    workers = max(1, min(config.max_concurrent_repos, len(work)))
-    if workers == 1:
-        results: list[RunResult] = list(sweep_results)
-        for repo, slice_ in work:
-            results.extend(_process_repo(repo, slice_, config))
-        return results
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_process_repo, repo, slice_, config) for repo, slice_ in work]
-        return list(sweep_results) + [r for fut in futures for r in fut.result()]
+    _self_file_failures(results, config)
+    return results
 
 
 def _process_repo(
@@ -504,14 +508,21 @@ class _SanitizedSubprocessTimeoutError(_SanitizedSubprocessError):
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _AUTH_HEADER_RE = re.compile(r"Authorization:\s*Basic\s+[A-Za-z0-9+/=]+", re.IGNORECASE)
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
-_TRANSCRIPT_REF_RE = re.compile(r"\bsee\s+`?(?P<path>[^`\s]+\.log)`?")
-_TRANSCRIPT_TAIL_MAX_CHARS = 4000
-_TRANSCRIPT_TAIL_MAX_LINES = 80
 _CONDUCTOR_TIMEOUT_OVERRIDE_RE = re.compile(
     r"(?im)^\s*alchemist-(?:conductor-)?timeout\s*:\s*(?P<value>\S.*?)\s*$"
 )
 _CONDUCTOR_TIMEOUT_MIN_SEC = 60
 _CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
+_META_REPO = "autumngarage/alchemist"
+_META_TITLE_PREFIX = "[alchemist-meta] failure: "
+_META_SIGNATURE_LEN = 12
+_EXTERNAL_FAILURE_PATTERNS = (
+    re.compile(r"\brate.?limit\b", re.IGNORECASE),
+    re.compile(r"\b(?:429|503|504)\b", re.IGNORECASE),
+    re.compile(r"\beconnrefused\b", re.IGNORECASE),
+    re.compile(r"\bnetwork\b", re.IGNORECASE),
+    re.compile(r"github api", re.IGNORECASE),
+)
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -945,6 +956,220 @@ def _sanitize_error_text(text: str, *, token: str | None = None) -> str:
     return _GITHUB_TOKEN_RE.sub("[redacted-token]", sanitized)
 
 
+def _tail_text(path: Path, *, max_lines: int = 30, max_chars: int = 3000) -> str:
+    """Return a bounded tail from a text file, or "" when missing/empty."""
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    tail = "\n".join(text.splitlines()[-max_lines:]).strip()
+    if not tail:
+        return ""
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def _split_conductor_tail(message: str) -> tuple[str, str | None]:
+    marker = "transcript tail:\n"
+    if marker not in message:
+        return message, None
+
+    head, remainder = message.split(marker, 1)
+    tail_text = remainder.strip()
+    reason = head.rstrip()
+
+    if "\nsee " in remainder:
+        tail_text, pointer = remainder.rsplit("\nsee ", 1)
+        pointer = pointer.strip()
+        reason = f"{head.rstrip()} see {pointer}".strip()
+
+    tail = tail_text.strip()
+    return reason, (tail or None)
+
+
+def _normalize_error_for_signature(error: str) -> str:
+    normalized = _sanitize_error_text(error).lower()
+    normalized = re.sub(r"/var/alchemist/state/transcripts/[^\s`]+", "<transcript>", normalized)
+    normalized = re.sub(r"\balchemist/issue-\d+(?:-[a-z0-9-]+)?\b", "<branch>", normalized)
+    normalized = re.sub(r"\b(?:pr|pull)\s*#?\d+\b", "<pr>", normalized)
+    normalized = re.sub(r"/pull/\d+", "/pull/<n>", normalized)
+    normalized = re.sub(r"#\d+", "#<n>", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _failure_signature(error: str) -> str:
+    normalized = _normalize_error_for_signature(error)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return digest[:_META_SIGNATURE_LEN]
+
+
+def _failure_summary(error: str) -> str:
+    first_line = error.splitlines()[0].strip() if error.strip() else "unspecified failure"
+    first_line = re.sub(r"\s*transcript tail:\s*$", "", first_line, flags=re.IGNORECASE)
+    if len(first_line) > 80:
+        return first_line[:80].rstrip()
+    return first_line or "unspecified failure"
+
+
+def _find_existing_meta_issue(signature: str) -> int | None:
+    cmd = [
+        "gh", "issue", "list",
+        "--repo", _META_REPO,
+        "--state", "open",
+        "--search", _META_TITLE_PREFIX,
+        "--json", "number,title",
+        "--limit", "100",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # noqa: S603
+    if result.returncode != 0:
+        raise _GhError(result.stderr.strip() or f"gh issue list exit {result.returncode}")
+
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError as exc:
+        raise _GhError(f"gh issue list JSON parse failed: {exc}") from exc
+
+    if not isinstance(payload, list):
+        return None
+
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        number = item.get("number")
+        if not isinstance(title, str) or not isinstance(number, int):
+            continue
+        if title.startswith(_META_TITLE_PREFIX) and signature in title:
+            return number
+    return None
+
+
+def _self_file_failure(result: RunResult, config: Config) -> None:
+    if not result.error:
+        return
+
+    sanitized_error = _sanitize_error_text(result.error, token=config.github_token)
+    signature = _failure_signature(sanitized_error)
+    existing_issue = _find_existing_meta_issue(signature)
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    source = f"{result.repo}#{result.issue_number}"
+
+    if existing_issue is not None:
+        body = f"+1 occurrence: {source} at {timestamp}"
+        comment_cmd = [
+            "gh", "issue", "comment", str(existing_issue),
+            "--repo", _META_REPO,
+            "--body", body,
+        ]
+        comment_result = subprocess.run(  # noqa: S603
+            comment_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if comment_result.returncode != 0:
+            raise _GhError(
+                comment_result.stderr.strip()
+                or f"gh issue comment exit {comment_result.returncode}"
+            )
+        return
+
+    summary = _failure_summary(sanitized_error)
+    title = f"{_META_TITLE_PREFIX}{summary} [{signature}]"
+    body = (
+        "This issue was opened automatically by alchemist's self-file path.\n\n"
+        f"Source: {source}\n"
+        f"Signature: `{signature}`\n\n"
+        "Sanitized failure:\n\n"
+        "```text\n"
+        f"{sanitized_error}\n"
+        "```\n"
+    )
+    create_cmd = [
+        "gh", "issue", "create",
+        "--repo", _META_REPO,
+        "--title", title,
+        "--body", body,
+    ]
+    create_result = subprocess.run(  # noqa: S603
+        create_cmd, capture_output=True, text=True, timeout=30,
+    )
+    if create_result.returncode != 0:
+        raise _GhError(
+            create_result.stderr.strip()
+            or f"gh issue create exit {create_result.returncode}"
+        )
+
+
+def _is_external_failure(error: str) -> bool:
+    return any(pattern.search(error) for pattern in _EXTERNAL_FAILURE_PATTERNS)
+
+
+def _is_meta_issue_number(issue_number: int) -> bool:
+    cmd = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", _META_REPO,
+        "--json", "title",
+        "--jq", ".title",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)  # noqa: S603
+    if result.returncode != 0:
+        return False
+    title = result.stdout.strip()
+    return title.startswith(_META_TITLE_PREFIX)
+
+
+def _is_meta_self_issue_result(result: RunResult) -> bool:
+    if result.repo != _META_REPO:
+        return False
+    return _is_meta_issue_number(result.issue_number)
+
+
+def _self_file_failures(results: list[RunResult], config: Config) -> None:
+    if config.dry_run:
+        return
+
+    disable = os.environ.get("ALCHEMIST_DISABLE_SELF_FILE", "").strip().lower()
+    if disable in {"1", "true"}:
+        return
+
+    filed = 0
+    for result in results:
+        if not result.error:
+            continue
+
+        sanitized_error = _sanitize_error_text(result.error, token=config.github_token)
+        if _is_external_failure(sanitized_error):
+            continue
+        if _is_meta_self_issue_result(result):
+            continue
+
+        if filed >= 3:
+            print(
+                f"alchemist: self-file cap reached; skipping meta-issue for "
+                f"{result.repo}#{result.issue_number}",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            _self_file_failure(result, config)
+        except Exception as exc:  # noqa: BLE001 — self-file is best-effort
+            print(
+                "alchemist: self-file failed for "
+                f"{result.repo}#{result.issue_number}: "
+                f"{_sanitize_error_text(str(exc), token=config.github_token)}",
+                file=sys.stderr,
+            )
+            continue
+
+        filed += 1
+
+
 def _run_git_auth(
     cmd: list[str], *, cwd: Path | None = None, token: str, timeout: int
 ) -> subprocess.CompletedProcess[str]:
@@ -1144,7 +1369,15 @@ def _run_conductor(
             raise _ToolError(f"timeout after {timeout + 30}s") from exc
 
     if result.returncode != 0:
-        raise _ToolError(f"exit {result.returncode}; see {transcript_path}")
+        tail = _tail_text(transcript_path)
+        if not tail:
+            raise _ToolError(f"exit {result.returncode} (transcript missing or empty)")
+        sanitized_tail = _sanitize_error_text(tail)
+        raise _ToolError(
+            f"exit {result.returncode}; transcript tail:\n"
+            f"{sanitized_tail}\n"
+            f"see {transcript_path}"
+        )
 
 
 def _has_changes(repo_dir: Path) -> bool:
@@ -1249,53 +1482,6 @@ def _extract_agent_summary(transcript_path: Path, max_chars: int = 600) -> str |
         return None
     tail = text[-max_chars:].strip()
     return tail or None
-
-
-def _message_with_transcript_tail(message: str, config: Config) -> str:
-    """Append a bounded transcript tail when an error points at a local log."""
-    tail = _transcript_tail_for_message(message, config)
-    if tail is None:
-        return message
-    return (
-        f"{message}\n\n"
-        "Transcript tail (last "
-        f"{_TRANSCRIPT_TAIL_MAX_LINES} lines, sanitized):\n\n"
-        "```text\n"
-        f"{tail}\n"
-        "```"
-    )
-
-
-def _transcript_tail_for_message(message: str, config: Config) -> str | None:
-    match = _TRANSCRIPT_REF_RE.search(message)
-    if not match:
-        return None
-
-    transcript_path = Path(match.group("path"))
-    allowed_dir = (config.state_dir / "transcripts").resolve(strict=False)
-    resolved_path = transcript_path.resolve(strict=False)
-    try:
-        resolved_path.relative_to(allowed_dir)
-    except ValueError:
-        return None
-
-    if not resolved_path.is_file():
-        return None
-
-    try:
-        text = resolved_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-    tail = "\n".join(text.splitlines()[-_TRANSCRIPT_TAIL_MAX_LINES:]).strip()
-    if not tail:
-        return None
-    if len(tail) > _TRANSCRIPT_TAIL_MAX_CHARS:
-        tail = (
-            f"[... truncated to last {_TRANSCRIPT_TAIL_MAX_CHARS} chars]\n"
-            f"{tail[-_TRANSCRIPT_TAIL_MAX_CHARS:]}"
-        )
-    return _sanitize_error_text(tail, token=config.github_token)
 
 
 def _parse_budget(raw: str) -> float | None:
@@ -1816,14 +2002,26 @@ def _post_error_comment(
     branch: str | None = None,
 ) -> None:
     """Post a uniform error outcome comment for bail/error transitions."""
-    reason = _message_with_transcript_tail(message, config)
+    reason, tail = _split_conductor_tail(message)
     branch_text = branch or "(unknown)"
+    details_block = ""
+    if tail:
+        details_block = (
+            "\n<details>\n"
+            "<summary>Conductor transcript tail</summary>\n\n"
+            "```text\n"
+            f"{tail}\n"
+            "```\n\n"
+            "</details>\n"
+        )
+
     _post_activity_comment(
         repo,
         issue_number,
         (
             f"⚠️ alchemist hit an error: {reason}\n\n"
             f"Working branch: {branch_text}\n"
+            f"{details_block}"
             "Inspect the branch or remove the `alchemist-error` label to retry."
         ),
         config,
