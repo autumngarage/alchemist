@@ -1349,6 +1349,7 @@ def _run_conductor(
     cmd = [
         "conductor", "exec",
         "--with", provider,
+        "--effort", "high",
         "--tools", "Read,Edit,Write,Bash",
         "--brief-file", str(brief_path),
         "--cwd", str(cwd),
