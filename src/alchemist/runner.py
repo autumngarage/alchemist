@@ -1109,6 +1109,10 @@ def _is_external_failure(error: str) -> bool:
     return any(pattern.search(error) for pattern in _EXTERNAL_FAILURE_PATTERNS)
 
 
+def _is_expected_nonfailure_error(error: str) -> bool:
+    return error.strip().lower() == "conductor produced no diff"
+
+
 def _is_meta_issue_number(issue_number: int) -> bool:
     cmd = [
         "gh", "issue", "view", str(issue_number),
@@ -1144,6 +1148,8 @@ def _self_file_failures(results: list[RunResult], config: Config) -> None:
 
         sanitized_error = _sanitize_error_text(result.error, token=config.github_token)
         if _is_external_failure(sanitized_error):
+            continue
+        if _is_expected_nonfailure_error(sanitized_error):
             continue
         if _is_meta_self_issue_result(result):
             continue
