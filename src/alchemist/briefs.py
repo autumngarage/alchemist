@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from alchemist.scanner import DispatchIssue
 
 
-BRIEF_TEMPLATE_VERSION = "1"
+BRIEF_TEMPLATE_VERSION = "2"
 
 _CONVENTIONS_MAX_CHARS = 8 * 1024
 _CONVENTIONS_FILES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md")
