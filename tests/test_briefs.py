@@ -45,7 +45,7 @@ def test_brief_requires_reading_referenced_file_before_editing(tmp_path: Path):
 
 
 def test_brief_template_version_constant_exported():
-    assert BRIEF_TEMPLATE_VERSION == "1"
+    assert BRIEF_TEMPLATE_VERSION == "2"
 
 
 def test_render_brief_includes_conventions_when_claude_md_present(tmp_path: Path):
@@ -94,7 +94,7 @@ def test_pr_body_links_to_source_issue_and_attributes_alchemist():
     body = render_pr_body(issue=_issue(), provider="openrouter")
     assert _issue().url in body
     assert "Transmuted by" in body
-    assert "brief template v1" in body
+    assert "brief template v2" in body
     assert "openrouter" in body
 
 
