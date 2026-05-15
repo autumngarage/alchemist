@@ -74,6 +74,8 @@
 #   CODEX_REVIEW_MAX_DIFF_LINES       — skip review if diff > this many lines (default: 5000)
 #   CODEX_REVIEW_CACHE_CLEAN          — cache exact-input clean reviews (default: true)
 #   CODEX_REVIEW_TIMEOUT              — optional wall-clock timeout per invocation in seconds (default: 0, no Touchstone wrapper timeout)
+#   TOUCHSTONE_CONDUCTOR_TIMEOUT_GRACE_SEC — reserve this many seconds for Conductor diagnostics before wrapper timeout (default: 30)
+#   TOUCHSTONE_REVIEW_HEARTBEAT_SEC   — progress heartbeat while waiting on reviewer (default: 60; 0 disables)
 #   CODEX_REVIEW_ON_ERROR             — fail-open (default) or fail-closed
 #   CODEX_REVIEW_CONTEXT_MODE         — auto|full|bounded prompt context selection (default: auto)
 #   CODEX_REVIEW_CONTEXT_SMALL_MAX_DIFF_LINES — bounded-context diff line cap (default: 400)
@@ -261,6 +263,11 @@ if [ -f "$PREFLIGHT_SCRIPT" ]; then
   # shellcheck source=../lib/preflight.sh
   source "$PREFLIGHT_SCRIPT"
 fi
+REVIEW_COMMENT_SCRIPT="$TOUCHSTONE_ROOT/lib/review-comment.sh"
+if [ -f "$REVIEW_COMMENT_SCRIPT" ]; then
+  # shellcheck source=../lib/review-comment.sh
+  source "$REVIEW_COMMENT_SCRIPT"
+fi
 
 # --------------------------------------------------------------------------
 # Skip-event audit log
@@ -392,6 +399,8 @@ CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
 PREFLIGHT_REQUIRED=true
 REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-0}"
+CONDUCTOR_TIMEOUT_GRACE_SEC="${TOUCHSTONE_CONDUCTOR_TIMEOUT_GRACE_SEC:-30}"
+REVIEW_HEARTBEAT_SEC="${TOUCHSTONE_REVIEW_HEARTBEAT_SEC:-60}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
 UNSAFE_PATHS=""
 HIGH_SCRUTINY_PATHS=""
@@ -1700,6 +1709,28 @@ reviewer_conductor_auth_ok() {
   echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'
 }
 
+conductor_inner_timeout() {
+  local wrapper_timeout="${1:-0}"
+  local grace="${CONDUCTOR_TIMEOUT_GRACE_SEC:-30}"
+  local min_adjustable_timeout
+
+  if ! [ "$wrapper_timeout" -gt 0 ] 2>/dev/null; then
+    return 1
+  fi
+  if ! [ "$grace" -gt 0 ] 2>/dev/null; then
+    printf '%s\n' "$wrapper_timeout"
+    return 0
+  fi
+
+  min_adjustable_timeout=$((grace * 2))
+  if [ "$wrapper_timeout" -le "$min_adjustable_timeout" ]; then
+    printf '%s\n' "$wrapper_timeout"
+    return 0
+  fi
+
+  printf '%s\n' "$((wrapper_timeout - grace))"
+}
+
 reviewer_conductor_exec() {
   local prompt="$1"
   local phase="${REVIEW_PHASE:-review}"
@@ -1707,6 +1738,7 @@ reviewer_conductor_exec() {
   local subcommand
   local tools
   local effective_with
+  local conductor_timeout
 
   # REVIEW_MODE + REVIEW_PHASE → Conductor job shape. The default phase uses
   # Conductor's semantic review command and lets Conductor own routing policy.
@@ -1728,8 +1760,8 @@ reviewer_conductor_exec() {
       args+=(--exclude "$CONDUCTOR_EXCLUDE")
     fi
     args+=(--base "$BASE" --brief-file -)
-    if [ "${REVIEW_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
-      args+=(--timeout "$REVIEW_TIMEOUT")
+    if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
+      args+=(--timeout "$conductor_timeout")
     fi
     printf '%s' "$prompt" \
       | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
@@ -1750,8 +1782,8 @@ reviewer_conductor_exec() {
 
   if [ "$subcommand" = "exec" ]; then
     args+=(--tools "$tools")
-    if [ "${REVIEW_TIMEOUT:-0}" -gt 0 ] 2>/dev/null; then
-      args+=(--timeout "$REVIEW_TIMEOUT")
+    if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
+      args+=(--timeout "$conductor_timeout")
     fi
     if [ -n "${REVIEW_CONDUCTOR_LOG_FILE:-}" ]; then
       args+=(--log-file "$REVIEW_CONDUCTOR_LOG_FILE")
@@ -1929,7 +1961,7 @@ conductor_route_preflight_for_phase() {
   fi
 
   estimated_input_tokens=$((ROUTING_DIFF_LINE_COUNT * 20 + 1000))
-  args=(route --json --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
+  args=(route --json --kind "$subcommand" --prefer "${CONDUCTOR_PREFER:-best}" --effort "${CONDUCTOR_EFFORT:-high}"
     --estimated-input-tokens "$estimated_input_tokens" --estimated-output-tokens 500)
   [ -n "$route_tags" ] && args+=(--tags "$route_tags")
   [ -n "$tools" ] && args+=(--tools "$tools")
@@ -2287,7 +2319,35 @@ run_reviewer_with_timeout() {
   ) &
   local pid=$!
   (
-    sleep "$timeout_secs"
+    local elapsed heartbeat last_line remaining sleep_for
+    elapsed=0
+    heartbeat="${REVIEW_HEARTBEAT_SEC:-60}"
+    if ! [ "$heartbeat" -gt 0 ] 2>/dev/null; then
+      heartbeat=0
+    fi
+
+    while [ "$elapsed" -lt "$timeout_secs" ]; do
+      remaining=$((timeout_secs - elapsed))
+      sleep_for="$remaining"
+      if [ "$heartbeat" -gt 0 ] && [ "$heartbeat" -lt "$remaining" ]; then
+        sleep_for="$heartbeat"
+      fi
+      sleep "$sleep_for"
+      elapsed=$((elapsed + sleep_for))
+
+      if ! kill -0 "$pid" 2>/dev/null; then
+        exit 0
+      fi
+      if [ "$heartbeat" -gt 0 ] && [ "$elapsed" -lt "$timeout_secs" ]; then
+        last_line="$(grep '^\[conductor\]' "$REVIEW_STDERR_FILE" 2>/dev/null | tail -n 1 || true)"
+        if [ -n "$last_line" ]; then
+          echo "==> Review still running (${elapsed}s/${timeout_secs}s); last Conductor event: $last_line" >&2
+        else
+          echo "==> Review still running (${elapsed}s/${timeout_secs}s); waiting on reviewer output" >&2
+        fi
+      fi
+    done
+
     kill_process_tree "$pid" TERM
     sleep 10
     kill_process_tree "$pid" KILL
@@ -2579,9 +2639,9 @@ if ! resolve_reviewer; then
   printf '%b' "$REVIEWER_STATUS"
   echo "    Touchstone 2.0 routes every review through the \`conductor\` CLI."
   echo "    Fix above, then re-run \`git push\` to trigger review again."
-  echo "==> Review status: provider/infrastructure unavailable; findings=0; exit_reason=$unavailable_reason"
+  echo "==> Review status: review_not_completed; provider/infrastructure unavailable; findings=0; exit_reason=$unavailable_reason"
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","diagnostics_file":"","diagnostics_events":0,"exit_reason":"%s","elapsed_seconds":0}\n' \
+    printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"review_status":"review_not_completed","fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","diagnostics_file":"","diagnostics_events":0,"exit_reason":"%s","elapsed_seconds":0}\n' \
       "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" \
       "$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null | wc -l | tr -d ' ')" "$ROUTING_DIFF_LINE_COUNT" \
       "${HIGH_SCRUTINY_TRIGGERED:-false}" "${HIGH_SCRUTINY_MODE:-peer}" "$unavailable_reason" \
@@ -2882,12 +2942,17 @@ review_findings_history_file() {
   printf '%s/%s.jsonl' "$(review_findings_history_dir)" "$(review_clean_marker_key "$branch")"
 }
 
-# Strip trailing whitespace from each line and drop empty trailing lines.
-# Findings text comes from the reviewer's stdout, which can include shell
-# color codes or stray indentation; the gate only persists lines that start
-# with `- ` (the BLOCKED contract).
+# Extract and normalize actionable findings from reviewer stdout. The prompt
+# asks for `- path:line` bullets, but hosted reviewers sometimes return
+# numbered lists, Markdown finding headings, or `Issue:` prefixes. Normalize
+# those shapes back to `- ...` so operators see the findings instead of a
+# parser failure.
 extract_findings_block() {
-  printf '%s\n' "$1" | awk '/^- / { print } /^$/ { if (have_finding) exit }'
+  if declare -F review_comment_findings_from_output >/dev/null 2>&1; then
+    review_comment_findings_from_output "$1"
+    return 0
+  fi
+  printf '%s\n' "$1" | awk '/^- / { print; found = 1 } /^$/ { if (found) exit }'
 }
 
 write_review_findings() {
@@ -3619,6 +3684,24 @@ parse_peer_provider() {
   fi
 }
 
+primary_provider_for_peer_review() {
+  local provider
+  provider="$(parse_primary_provider)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+    return 0
+  fi
+
+  # If Conductor did not emit parseable provider telemetry, a pinned provider
+  # (or merge-gate route preflight provider) is still a trustworthy exclusion.
+  # Leave truly unknown auto-routed cases empty so peer review skips rather than
+  # risk asking the same provider for a second opinion.
+  provider="$(conductor_effective_with_for_phase review)"
+  if [ -n "$provider" ]; then
+    printf '%s' "$provider"
+  fi
+}
+
 conductor_invocation_label() {
   local conductor_path subcommand
   conductor_path="$(command -v conductor 2>/dev/null || printf 'conductor')"
@@ -3823,7 +3906,7 @@ try_review_fallback_retry() {
 run_peer_review() {
   local primary_output="$1"
   local primary_provider mode
-  primary_provider="$(parse_primary_provider)"
+  primary_provider="$(primary_provider_for_peer_review)"
   mode="peer"
   if [ "${HIGH_SCRUTINY_TRIGGERED:-false}" = true ]; then
     mode="${HIGH_SCRUTINY_MODE:-peer}"
@@ -3887,21 +3970,56 @@ run_peer_review() {
 }
 
 build_peer_review_prompt() {
-  local primary_output="$1"
+  local primary_output="$1" changed_paths
+  changed_paths="${PROMPT_CONTEXT_CHANGED_PATHS:-$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || true)}"
   cat <<EOF
 You are a peer code reviewer giving a second opinion on another AI reviewer's output.
-You are asked to be a QUICK second opinion, NOT to redo the review from scratch.
+You are asked to be a QUICK second opinion, NOT a full independent review.
 
-The primary reviewer examined a code change and produced the output below. Your job:
+Use the branch context and diff below to verify whether the primary reviewer's verdict is credible.
+Do not complain that you cannot see the diff; it is embedded in this prompt.
+
+Your job:
   1. Do you AGREE or DISAGREE with the primary's overall verdict (CLEAN / FIXED / BLOCKED)?
   2. Anything the primary MISSED that you'd flag?
   3. Anything the primary FLAGGED that you think is a false positive?
 
 Keep your response under 300 words. Lead with AGREE or DISAGREE on a line by itself.
 
---- Primary reviewer output: ---
+## Branch context
+
+Base: $BASE
+Merge base: $MERGE_BASE
+High scrutiny: ${HIGH_SCRUTINY_REASON:-none}
+
+Changed files:
+$(if [ -n "$changed_paths" ]; then
+    printf '%s\n' "$changed_paths" | sed '/^$/d; s/^/- /'
+  else
+    printf '(none)\n'
+  fi)
+
+Commit messages:
+
+$(git log --reverse --format='### %s%n%n%b' "$MERGE_BASE"..HEAD 2>/dev/null | sed '/^$/N;/^\n$/d')
+$(if [ -n "$REVIEW_CONTEXT_FILE" ]; then
+    printf '\n## Project review context\n\n'
+    cat "$REVIEW_CONTEXT_FILE"
+  fi)
+
+## Diff
+
+\`\`\`diff
+$(if is_truthy "${SCOPED_LARGE_DIFF_REVIEW:-false}" && [ -n "${SCOPED_LARGE_DIFF_FILE:-}" ]; then
+    cat "$SCOPED_LARGE_DIFF_FILE"
+  else
+    git diff "$MERGE_BASE"..HEAD 2>/dev/null
+  fi)
+\`\`\`
+
+## Primary reviewer output
+
 $primary_output
---- End primary output ---
 EOF
 }
 
@@ -4025,12 +4143,29 @@ ${fix_output}"
 # Structured summary
 # --------------------------------------------------------------------------
 
+review_completion_status() {
+  case "${1:-}" in
+    clean | blocked | cache-hit)
+      printf 'completed\n'
+      ;;
+    *)
+      printf 'review_not_completed\n'
+      ;;
+  esac
+}
+
+print_retry_suggestion() {
+  echo "    Review did not complete. Retry with: CODEX_REVIEW_FORCE=1 git push"
+  echo "    If one provider is degraded, pin a healthy provider with TOUCHSTONE_CONDUCTOR_WITH=<provider>."
+}
+
 print_summary() {
-  local elapsed mins secs findings provider model peer_provider diagnostics_file diagnostics_events
+  local elapsed mins secs findings provider model peer_provider diagnostics_file diagnostics_events review_status
   elapsed=$(($(date +%s) - REVIEW_START_TIME))
   mins=$((elapsed / 60))
   secs=$((elapsed % 60))
   findings="${REVIEW_FINDINGS_COUNT:-0}"
+  review_status="$(review_completion_status "$REVIEW_EXIT_REASON")"
   provider="$(parse_primary_provider)"
   [ -n "$provider" ] || provider="$(conductor_effective_with_for_phase review)"
   [ -n "$provider" ] || provider="unknown"
@@ -4064,6 +4199,9 @@ print_summary() {
     printf "  ${C_DIM}high scrutiny:  %s (%s)${C_RESET}\n" "$HIGH_SCRUTINY_MODE" "$HIGH_SCRUTINY_REASON"
   fi
   printf "  ${C_DIM}findings:       %s${C_RESET}\n" "$findings"
+  if [ "$review_status" != "completed" ]; then
+    printf "  ${C_DIM}review status:  %s${C_RESET}\n" "$review_status"
+  fi
   if [ "$REVIEW_FALLBACK_ATTEMPTED" = true ]; then
     printf "  ${C_DIM}fallback:       %s -> %s (%s)${C_RESET}\n" \
       "${REVIEW_FALLBACK_PRIMARY_PROVIDER:-unknown}" \
@@ -4081,12 +4219,12 @@ print_summary() {
   printf "  ${C_DIM}──────────────────────────────────────────${C_RESET}\n"
 
   if [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ]; then
-    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"%s","findings":%d,"fallback_attempted":%s,"fallback_primary_provider":"%s","fallback_retry_provider":"%s","fallback_excluded_providers":"%s","fallback_reason":"%s","diagnostics_file":"%s","diagnostics_events":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
+    printf '{"reviewer":"%s","provider":"%s","model":"%s","peer_provider":"%s","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":%d,"fix_commits":%d,"peer_assists":%d,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"%s","findings":%d,"review_status":"%s","fallback_attempted":%s,"fallback_primary_provider":"%s","fallback_retry_provider":"%s","fallback_excluded_providers":"%s","fallback_reason":"%s","diagnostics_file":"%s","diagnostics_events":%d,"exit_reason":"%s","elapsed_seconds":%d}\n' \
       "$REVIEWER_LABEL" "$provider" "$model" "$peer_provider" "$ROUTING_DECISION" "$REVIEW_MODE" "$PROMPT_CONTEXT_DECISION" "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" "$REVIEW_FILES_INSPECTED" "$DIFF_LINE_COUNT" \
       "${iter:-0}" "$FIX_COMMITS" "$ASSIST_ROUNDS" "${HIGH_SCRUTINY_TRIGGERED:-false}" \
       "$(printf '%s' "${HIGH_SCRUTINY_MODE:-peer}" | json_escape)" \
       "$(printf '%s' "${HIGH_SCRUTINY_REASON:-}" | json_escape)" \
-      "$findings" "$REVIEW_FALLBACK_ATTEMPTED" \
+      "$findings" "$review_status" "$REVIEW_FALLBACK_ATTEMPTED" \
       "$(printf '%s' "${REVIEW_FALLBACK_PRIMARY_PROVIDER:-}" | json_escape)" \
       "$(printf '%s' "${REVIEW_FALLBACK_RETRY_PROVIDER:-}" | json_escape)" \
       "$(printf '%s' "${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-}" | json_escape)" \
@@ -4316,6 +4454,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
   if [ "$EXIT" -eq 124 ]; then
     phase "timed out"
     echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s."
+    print_retry_suggestion
     REVIEW_EXIT_REASON="timeout"
     append_review_diagnostic_event "review-timeout" "timeout after ${REVIEW_TIMEOUT}s"
     print_summary
@@ -4333,6 +4472,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
   if [ $EXIT -ne 0 ]; then
     echo "==> $REVIEWER_LABEL review failed with exit $EXIT."
+    print_retry_suggestion
     REVIEW_EXIT_REASON="error"
     append_review_diagnostic_event "review-error" "reviewer exit $EXIT"
     print_summary
@@ -4358,6 +4498,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
         if [ "$EXIT" -eq 124 ]; then
           phase "timed out"
           echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s after peer assistance."
+          print_retry_suggestion
           REVIEW_EXIT_REASON="timeout"
           append_review_diagnostic_event "assist-timeout" "timeout after ${REVIEW_TIMEOUT}s after peer assistance"
           print_summary
@@ -4366,6 +4507,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
         if [ "$EXIT" -ne 0 ]; then
           echo "==> $REVIEWER_LABEL review failed with exit $EXIT after peer assistance."
+          print_retry_suggestion
           REVIEW_EXIT_REASON="error"
           append_review_diagnostic_event "assist-error" "reviewer exit $EXIT after peer assistance"
           print_summary
@@ -4393,6 +4535,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       if [ "$EXIT" -eq 124 ]; then
         phase "timed out"
         echo "==> $REVIEWER_LABEL timed out after ${REVIEW_TIMEOUT}s during fallback retry."
+        print_retry_suggestion
         REVIEW_EXIT_REASON="timeout"
         append_review_diagnostic_event "fallback-timeout" "timeout after ${REVIEW_TIMEOUT}s during fallback retry"
         print_summary
@@ -4401,6 +4544,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
       if [ "$EXIT" -ne 0 ]; then
         echo "==> $REVIEWER_LABEL fallback review failed with exit $EXIT."
+        print_retry_suggestion
         REVIEW_EXIT_REASON="error"
         append_review_diagnostic_event "fallback-error" "reviewer exit $EXIT during fallback retry"
         print_summary
@@ -4487,7 +4631,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
 
     CODEX_REVIEW_BLOCKED)
       phase "done — blocked"
-      REVIEW_FINDINGS_COUNT="$(printf '%s\n' "$OUTPUT" | grep -c '^- ' || true)"
+      REVIEW_FINDINGS_COUNT="$(extract_findings_block "$OUTPUT" | grep -c '^- ' || true)"
       blocked_subtitle="${REVIEWER_LABEL} flagged issues to address · push refused"
       tk_verdict fail "PUSH BLOCKED" "$blocked_subtitle"
       printf '%s\n' "$OUTPUT" | sed 's/^/    /'
@@ -4522,6 +4666,7 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       echo "    Last non-blank line was: '$LAST_LINE'"
       echo "    Raw output (first 20 lines):"
       printf '%s\n' "$OUTPUT" | head -20 | sed 's/^/    /'
+      print_retry_suggestion
       REVIEW_EXIT_REASON="malformed-sentinel"
       append_review_diagnostic_event "malformed-sentinel" "malformed sentinel"
       print_summary
