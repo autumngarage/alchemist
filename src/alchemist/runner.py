@@ -528,6 +528,9 @@ _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\bnetwork\b", re.IGNORECASE),
     re.compile(r"github api", re.IGNORECASE),
 )
+_BENIGN_STUCK_SWEEP_RE = re.compile(
+    r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
+)
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -1148,6 +1151,8 @@ def _self_file_failures(results: list[RunResult], config: Config) -> None:
             continue
 
         sanitized_error = _sanitize_error_text(result.error, token=config.github_token)
+        if _BENIGN_STUCK_SWEEP_RE.fullmatch(sanitized_error):
+            continue
         if _is_external_failure(sanitized_error):
             continue
         if _is_meta_self_issue_result(result):
