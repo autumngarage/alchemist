@@ -76,6 +76,7 @@ def _stub_all_external(
     git_auth_failure: bool = False,
     remote_branch_exists: bool = True,
     push_create_failure: bool = False,
+    push_workflow_permission_failure: bool = False,
     pr_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
@@ -257,6 +258,17 @@ def _stub_all_external(
 
         if "git" in cmd and "push" in cmd:
             captured["push_calls"].append(cmd)
+            if "--set-upstream" in cmd and push_workflow_permission_failure:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "remote: error: refusing to allow a GitHub App to create or update "
+                        "workflow `.github/workflows/issue-claim-check.yml` without "
+                        "`workflows` permission\n"
+                    ),
+                )
             if "--set-upstream" in cmd and push_create_failure:
                 return subprocess.CompletedProcess(
                     args=cmd,
@@ -411,6 +423,51 @@ def test_push_create_failure_is_sanitized_before_comments(
     assert "ghp_SECRETLEAK" not in combined
     assert "Z2hwX1NFQ1JFVA==" not in combined
     assert "[redacted" in combined
+
+
+def test_workflow_permission_push_failure_declines_without_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, push_workflow_permission_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.error is not None
+    assert "requires workflow-file edits" in r.error
+    assert captured["pr_creates"] == []
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-declined" in labels_added
+    assert "alchemist-test-error" not in labels_added
+
+
+def test_workflow_permission_push_failure_detector_matches_github_error():
+    from alchemist.runner import _is_workflow_permission_push_failure
+
+    error = (
+        "push: To https://github.com/autumngarage/touchstone.git\n"
+        " ! [remote rejected] branch -> branch "
+        "(refusing to allow a GitHub App to create or update workflow "
+        "`.github/workflows/issue-claim-check.yml` without `workflows` permission)"
+    )
+
+    assert _is_workflow_permission_push_failure(error)
+    assert not _is_workflow_permission_push_failure("push: authentication failed")
+
+
+def test_workflow_permission_push_failure_is_treated_as_external_failure():
+    from alchemist.runner import _is_external_failure
+
+    assert _is_external_failure(
+        "push: refusing to allow a GitHub App to create or update workflow "
+        "`.github/workflows/x.yml` without `workflows` permission"
+    )
 
 
 def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
