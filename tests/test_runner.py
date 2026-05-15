@@ -818,6 +818,23 @@ def test_no_diff_produced_results_in_decline(monkeypatch: pytest.MonkeyPatch, tm
     assert any("declined" in b for b in bodies), f"expected 'declined' comment; got {bodies}"
 
 
+def test_no_diff_decline_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Declines are expected outcomes and should not open alchemist-meta issues."""
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    captured = _stub_all_external(monkeypatch, conductor_outcome="no-diff")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error == "conductor produced no diff"
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_shipped_label_failure_is_visible_in_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
