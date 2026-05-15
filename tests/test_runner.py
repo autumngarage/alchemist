@@ -754,6 +754,34 @@ def test_merge_preflight_failure_is_fatal_with_pr_url(
     assert "alchemist-test-error" in labels_added
 
 
+def test_merge_preflight_failure_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.delenv("ALCHEMIST_DISABLE_SELF_FILE", raising=False)
+    captured = _stub_all_external(monkeypatch, merge_outcome="preflight-failed")
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
+def test_non_external_failure_self_files_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.delenv("ALCHEMIST_DISABLE_SELF_FILE", raising=False)
+    captured = _stub_all_external(monkeypatch, conductor_outcome="timeout")
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    assert len(captured["meta_issue_lists"]) == 1
+    assert len(captured["meta_issue_creates"]) == 1
+    assert captured["meta_issue_comments"] == []
+
+
 def test_merge_infra_failure_is_fatal_with_pr_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
