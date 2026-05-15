@@ -389,7 +389,19 @@ def _process_locked(
     try:
         _push_branch(work_dir, branch, repo, token)
     except subprocess.SubprocessError as exc:
-        return _bail(repo, issue, started, config, f"push: {exc}", branch=branch)
+        push_error = f"push: {exc}"
+        if _is_workflow_permission_push_failure(push_error):
+            return _decline(
+                repo,
+                issue,
+                started,
+                config,
+                "requires workflow-file edits, but this deployment's GitHub App "
+                "token cannot push `.github/workflows/*` without `workflows` "
+                "permission. Add the permission to the App installation or have "
+                "a human apply the change.",
+            )
+        return _bail(repo, issue, started, config, push_error, branch=branch)
 
     body = render_pr_body(
         issue=issue,
@@ -523,10 +535,12 @@ _META_TITLE_PREFIX = "[alchemist-meta] failure: "
 _META_SIGNATURE_LEN = 12
 _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\brate.?limit\b", re.IGNORECASE),
-    re.compile(r"\b(?:429|503|504)\b", re.IGNORECASE),
+    re.compile(r"\b(?:429|502|503|504)\b", re.IGNORECASE),
+    re.compile(r"\bbad gateway\b", re.IGNORECASE),
     re.compile(r"\beconnrefused\b", re.IGNORECASE),
     re.compile(r"\bnetwork\b", re.IGNORECASE),
     re.compile(r"github api", re.IGNORECASE),
+    re.compile(r"openrouter response was not json", re.IGNORECASE),
     re.compile(r"\bmerge-pr:\s*preflight failed\b", re.IGNORECASE),
 )
 _BENIGN_STUCK_SWEEP_RE = re.compile(
@@ -1760,6 +1774,17 @@ def _check_pr_merged(repo: str, pr_number: int) -> bool:
     output = result.stdout.strip()
     # `gh ... --jq .mergedAt` returns the timestamp string when merged, or empty/null otherwise.
     return bool(output) and output not in ("null", "")
+
+
+def _is_workflow_permission_push_failure(message: str) -> bool:
+    lower = message.lower()
+    return (
+        "refusing to allow a github app to create or update workflow" in lower
+        or (
+            ".github/workflows/" in lower
+            and "without `workflows` permission" in lower
+        )
+    )
 
 
 def _find_pr_for_head(repo: str, branch: str) -> tuple[str, int] | None:
