@@ -522,6 +522,7 @@ _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\beconnrefused\b", re.IGNORECASE),
     re.compile(r"\bnetwork\b", re.IGNORECASE),
     re.compile(r"github api", re.IGNORECASE),
+    re.compile(r"\bmerge-pr:\s*preflight failed\b", re.IGNORECASE),
 )
 
 
