@@ -513,6 +513,11 @@ _CONDUCTOR_TIMEOUT_OVERRIDE_RE = re.compile(
 )
 _CONDUCTOR_TIMEOUT_MIN_SEC = 60
 _CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
+# Conductor enforces its own --timeout internally. Give the subprocess wrapper
+# a bounded post-timeout grace so conductor can flush transcript/log output and
+# exit cleanly instead of being killed at +30s (observed in alchemist#132).
+_CONDUCTOR_SUBPROCESS_GRACE_MIN_SEC = 30
+_CONDUCTOR_SUBPROCESS_GRACE_MAX_SEC = 120
 _META_REPO = "autumngarage/alchemist"
 _META_TITLE_PREFIX = "[alchemist-meta] failure: "
 _META_SIGNATURE_LEN = 12
@@ -1345,6 +1350,10 @@ def _run_conductor(
     subprocess timeout for belt-and-suspenders. The structured NDJSON event
     stream is written to ndjson_path so alchemist can parse cost_usd from
     `event=="usage"` records (alchemist#33).
+
+    The subprocess timeout includes a bounded grace period beyond conductor's
+    own timeout. This gives conductor room to flush logs/transcript output and
+    exit cleanly when it hits its internal deadline.
     """
     cmd = [
         "conductor", "exec",
@@ -1356,6 +1365,11 @@ def _run_conductor(
         "--timeout", str(timeout),
         "--log-file", str(ndjson_path),
     ]
+    grace_sec = min(
+        _CONDUCTOR_SUBPROCESS_GRACE_MAX_SEC,
+        max(_CONDUCTOR_SUBPROCESS_GRACE_MIN_SEC, timeout // 10),
+    )
+    subprocess_timeout = timeout + grace_sec
     with transcript_path.open("w") as fh:
         try:
             result = subprocess.run(  # noqa: S603,S607
@@ -1363,11 +1377,11 @@ def _run_conductor(
                 stdout=fh, stderr=subprocess.STDOUT,
                 env=_conductor_env(),
                 text=True,
-                timeout=timeout + 30,
+                timeout=subprocess_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise _ToolError(f"timeout after {timeout + 30}s") from exc
+            raise _ToolError(f"timeout after {subprocess_timeout}s") from exc
 
     if result.returncode != 0:
         tail = _tail_text(transcript_path)
