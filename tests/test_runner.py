@@ -1493,6 +1493,53 @@ def test_token_never_appears_in_git_urls(monkeypatch: pytest.MonkeyPatch, tmp_pa
         )
 
 
+def test_openrouter_non_json_failure_is_treated_as_external():
+    from alchemist.runner import _is_external_failure
+
+    error = (
+        "conductor: exit 1; transcript tail:\n"
+        "[conductor] agent loop iteration cap: 60\n"
+        "conductor: OpenRouter response was not JSON: "
+        "Expecting value: line 651 column 1 (char 3575)"
+    )
+
+    assert _is_external_failure(error)
+
+
+def test_self_file_failures_skips_openrouter_non_json_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist import runner as runner_mod
+
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    filed: list[RunResult] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "_self_file_failure",
+        lambda result, config: filed.append(result),
+    )
+    monkeypatch.setattr(runner_mod, "_is_meta_self_issue_result", lambda result: False)
+
+    config = _config(tmp_path, dry_run=False)
+    result = RunResult(
+        repo="autumngarage/touchstone",
+        issue_number=394,
+        pr_url=None,
+        merged=None,
+        error=(
+            "conductor: exit 1; transcript tail:\n"
+            "conductor: OpenRouter response was not JSON: "
+            "Expecting value: line 651 column 1 (char 3575)"
+        ),
+        elapsed_sec=0.0,
+        dry_run=False,
+    )
+
+    runner_mod._self_file_failures([result], config)
+
+    assert filed == []
+
+
 def test_git_auth_prefix_uses_basic_header_with_x_access_token():
     """The auth prefix uses HTTP Basic with `x-access-token:<token>` so it
     works for both PATs and App installation tokens (GitHub's git endpoint
