@@ -4,8 +4,8 @@
 #
 # This guard is sourced by high-risk project-local scripts before they do PR
 # work. If the project was bootstrapped from an older Touchstone install, it
-# updates the Touchstone-owned files on the current feature branch and re-execs
-# the script so the current run uses the refreshed copy.
+# ships a dedicated Touchstone update PR from the default branch when that is
+# safe, or updates the current feature branch and re-execs the script.
 
 touchstone_script_sync_guard_truthy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -48,6 +48,39 @@ touchstone_script_sync_guard_default_branch() {
   printf '%s\n' "$default_branch"
 }
 
+touchstone_script_sync_guard_is_source_repo() {
+  local project_dir="$1"
+
+  [ -f "$project_dir/VERSION" ] \
+    && [ -f "$project_dir/bin/touchstone" ] \
+    && [ -f "$project_dir/bootstrap/update-project.sh" ]
+}
+
+touchstone_script_sync_guard_stamp() {
+  local project_dir="$1"
+  local project_version=""
+
+  project_version="$(tr -d '[:space:]' <"$project_dir/.touchstone-version" 2>/dev/null || true)"
+  printf '%s:%s\n' "$project_dir" "$project_version"
+}
+
+touchstone_script_sync_guard_mark_done() {
+  local project_dir="$1"
+
+  TOUCHSTONE_SCRIPT_SYNC_GUARD_DONE=1
+  TOUCHSTONE_SCRIPT_SYNC_GUARD_STAMP="$(touchstone_script_sync_guard_stamp "$project_dir")"
+  export TOUCHSTONE_SCRIPT_SYNC_GUARD_DONE TOUCHSTONE_SCRIPT_SYNC_GUARD_STAMP
+}
+
+touchstone_script_sync_guard_already_done() {
+  local project_dir="$1"
+  local expected_stamp
+
+  touchstone_script_sync_guard_truthy "${TOUCHSTONE_SCRIPT_SYNC_GUARD_DONE:-}" || return 1
+  expected_stamp="$(touchstone_script_sync_guard_stamp "$project_dir")"
+  [ "${TOUCHSTONE_SCRIPT_SYNC_GUARD_STAMP:-}" = "$expected_stamp" ]
+}
+
 touchstone_script_sync_guard() {
   local script_path="${1:-}"
   shift || true
@@ -58,8 +91,7 @@ touchstone_script_sync_guard() {
   if touchstone_script_sync_guard_truthy "${TOUCHSTONE_NO_SCRIPT_SYNC:-}" \
     || touchstone_script_sync_guard_truthy "${TOUCHSTONE_SCRIPT_SYNC_GUARD_DISABLE:-}" \
     || touchstone_script_sync_guard_truthy "${TOUCHSTONE_NO_AUTO_UPDATE:-}" \
-    || touchstone_script_sync_guard_truthy "${TOUCHSTONE_NO_AUTO_PROJECT_SYNC:-}" \
-    || touchstone_script_sync_guard_truthy "${TOUCHSTONE_SCRIPT_SYNC_GUARD_DONE:-}"; then
+    || touchstone_script_sync_guard_truthy "${TOUCHSTONE_NO_AUTO_PROJECT_SYNC:-}"; then
     return 0
   fi
   if ! command -v touchstone >/dev/null 2>&1; then
@@ -71,6 +103,12 @@ touchstone_script_sync_guard() {
   script_dir="$(cd "$(dirname "$resolved_script")" 2>/dev/null && pwd -P)" || return 0
   project_dir="$(cd "$script_dir/.." 2>/dev/null && pwd -P)" || return 0
   [ -f "$project_dir/.touchstone-version" ] || return 0
+  if touchstone_script_sync_guard_is_source_repo "$project_dir"; then
+    return 0
+  fi
+  if touchstone_script_sync_guard_already_done "$project_dir"; then
+    return 0
+  fi
 
   if ! git -C "$project_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     return 0
@@ -88,7 +126,10 @@ touchstone_script_sync_guard() {
   rm -f "$check_file"
 
   case "$check_output" in
-    *"Already up to date."*) return 0 ;;
+    *"Already up to date."*)
+      touchstone_script_sync_guard_mark_done "$project_dir"
+      return 0
+      ;;
     *"Needs update."*) ;;
     *) return 0 ;;
   esac
@@ -98,11 +139,22 @@ touchstone_script_sync_guard() {
   default_branch="$(touchstone_script_sync_guard_default_branch "$project_dir")"
   if [ -n "$current_branch" ] \
     && { [ "$current_branch" = "$default_branch" ] || [ "$current_branch" = "main" ] || [ "$current_branch" = "master" ]; }; then
-    echo "ERROR: Touchstone project files are stale, but $resolved_script is running on default branch '$current_branch'." >&2
-    echo "       Refusing to create a Touchstone update commit on the default branch." >&2
-    echo "       Run: touchstone update --ship" >&2
-    echo "       Then rerun this command." >&2
-    exit 2
+    local ship_file
+    ship_file="$(mktemp -t touchstone-script-sync-ship.XXXXXX)"
+    echo "==> Touchstone script sync: project-local workflow files are stale; shipping a Touchstone update PR before continuing." >&2
+    if ! (cd "$project_dir" && touchstone update --ship) >"$ship_file" 2>&1; then
+      echo "ERROR: Touchstone script sync ship failed before running $resolved_script:" >&2
+      sed 's/^/       /' "$ship_file" >&2
+      echo "       Retry: cd $project_dir && touchstone update --ship" >&2
+      rm -f "$ship_file"
+      exit 2
+    fi
+    sed 's/^/    /' "$ship_file" >&2
+    rm -f "$ship_file"
+
+    echo "==> Touchstone script sync: restarting $resolved_script" >&2
+    touchstone_script_sync_guard_mark_done "$project_dir"
+    exec bash "$resolved_script" "$@"
   fi
   if [ -z "$current_branch" ]; then
     echo "ERROR: Touchstone project files are stale, but $resolved_script is running from a detached HEAD." >&2
@@ -111,10 +163,16 @@ touchstone_script_sync_guard() {
   fi
 
   update_file="$(mktemp -t touchstone-script-sync-update.XXXXXX)"
-  echo "==> Touchstone script sync: project-local workflow files are stale; updating before continuing." >&2
+  echo "==> Touchstone script sync: project-local workflow files are stale; updating this feature branch before continuing." >&2
+  if [ -n "$default_branch" ]; then
+    echo "    Cleaner dedicated update path: git switch $default_branch && touchstone update --ship" >&2
+  else
+    echo "    Cleaner dedicated update path: touchstone update --ship from the default branch" >&2
+  fi
   if ! (cd "$project_dir" && touchstone update --in-place) >"$update_file" 2>&1; then
     echo "ERROR: Touchstone script sync update failed before running $resolved_script:" >&2
     sed 's/^/       /' "$update_file" >&2
+    echo "       Retry: cd $project_dir && touchstone update --in-place" >&2
     rm -f "$update_file"
     exit 2
   fi
@@ -122,5 +180,6 @@ touchstone_script_sync_guard() {
   rm -f "$update_file"
 
   echo "==> Touchstone script sync: restarting $resolved_script" >&2
-  TOUCHSTONE_SCRIPT_SYNC_GUARD_DONE=1 exec bash "$resolved_script" "$@"
+  touchstone_script_sync_guard_mark_done "$project_dir"
+  exec bash "$resolved_script" "$@"
 }
