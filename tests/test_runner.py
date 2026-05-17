@@ -782,6 +782,50 @@ def test_non_external_failure_self_files_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_is_external_failure_matches_tool_call_leak_and_iteration_cap():
+    from alchemist.runner import _is_external_failure
+
+    assert _is_external_failure(
+        "conductor: exit 1; transcript tail:\n"
+        "[conductor] Edit rejected for tests/test_openrouter.py: "
+        "tool-call leak detected while applying edit."
+    )
+    assert _is_external_failure(
+        "conductor: OpenRouter code execution failed: "
+        "[conductor] Reached --max-iterations cap (60)."
+    )
+    assert _is_external_failure(
+        "[conductor] iteration cap hit at 60. Tool usage: Read=9 Edit=6 Bash=46"
+    )
+
+
+def test_conductor_tool_call_leak_failure_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ToolError
+
+    monkeypatch.delenv("ALCHEMIST_DISABLE_SELF_FILE", raising=False)
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_conductor(*, transcript_path: Path, **_: object) -> None:
+        raise _ToolError(
+            "exit 1; transcript tail:\n"
+            "[conductor] Edit rejected for tests/test_openrouter.py: "
+            "tool-call leak detected while applying edit.\n"
+            "[conductor] Reached --max-iterations cap (60).\n"
+            f"see {transcript_path}"
+        )
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", fail_conductor)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_merge_infra_failure_is_fatal_with_pr_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
