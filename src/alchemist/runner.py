@@ -2016,6 +2016,11 @@ def _local_head_sha(repo_dir: Path) -> str | None:
     return None
 
 
+def _is_pr_already_exists_error(message: str) -> bool:
+    lower = message.lower()
+    return "pull request for branch" in lower and "already exists" in lower
+
+
 def _make_pr(
     repo: str, base: str, head: str, title: str, body: str
 ) -> tuple[str, int]:
@@ -2036,7 +2041,12 @@ def _make_pr(
             return reconciled
         raise _GhError("pr-create: timeout, no PR found on reconciliation") from exc
     if result.returncode != 0:
-        raise _GhError(result.stderr.strip() or f"gh pr create exit {result.returncode}")
+        detail = result.stderr.strip() or result.stdout.strip() or f"gh pr create exit {result.returncode}"
+        if _is_pr_already_exists_error(detail):
+            reconciled = _find_pr_for_head(repo, head)
+            if reconciled is not None:
+                return reconciled
+        raise _GhError(detail)
     url = result.stdout.strip().splitlines()[-1]
     # The URL ends in /pull/<N>; pull the number out so we can hand it to merge-pr.sh.
     match = re.search(r"/pull/(\d+)", url)

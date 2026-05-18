@@ -1203,6 +1203,55 @@ def test_make_pr_timeout_without_reconciliation_raises_gh_error(
         _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b")
 
 
+def test_make_pr_already_exists_reconciles_existing_pr(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _make_pr
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=["gh", "pr", "create"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                'a pull request for branch "alchemist/issue-7" into branch "main" '
+                "already exists"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "alchemist.runner._find_pr_for_head",
+        lambda repo, head: ("https://github.com/autumngarage/touchstone/pull/99", 99),
+    )
+
+    assert _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b") == (
+        "https://github.com/autumngarage/touchstone/pull/99",
+        99,
+    )
+
+
+def test_make_pr_already_exists_without_reconciliation_raises_gh_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from alchemist.runner import _GhError, _make_pr
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=["gh", "pr", "create"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                'a pull request for branch "alchemist/issue-7" into branch "main" '
+                "already exists"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("alchemist.runner._find_pr_for_head", lambda repo, head: None)
+
+    with pytest.raises(_GhError, match="already exists"):
+        _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b")
+
+
 def test_pr_state_for_head_returns_dict_on_success(monkeypatch: pytest.MonkeyPatch):
     from alchemist.runner import _pr_state_for_head
 
