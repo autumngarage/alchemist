@@ -2,9 +2,10 @@
 
 Issue-driven transmuter for the [Autumn Garage](https://github.com/autumngarage) family.
 
-A user files a GitHub issue and labels it `alchemist-dispatch`. Within ~5 minutes, Alchemist
-sees the label, dispatches the issue to [Conductor](https://github.com/autumngarage/conductor)'s
-agentic loop on a fresh feature branch, opens a PR, and hands it to
+A user files a GitHub issue. Within ~5 minutes, Alchemist scans for eligible open issues,
+skips issues with Alchemist state labels (or `alchemist-skip`), dispatches the issue to
+[Conductor](https://github.com/autumngarage/conductor)'s agentic loop on a fresh feature
+branch, opens a PR, and hands it to
 [Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` which runs the AI
 code-review gate and squash-merges on a CLEAN verdict. BLOCKED reviews leave the PR open
 with comments for human triage.
@@ -82,7 +83,7 @@ poll_interval_minutes = 5
 default_budget = "$2"
 default_provider = "openrouter"
 conductor_effort = "medium"       # production default; override per deployment as needed
-dispatch_label = "alchemist-test"  # flip to "alchemist-dispatch" after dogfood
+dispatch_label = "alchemist"       # label prefix for state transitions
 dry_run = true                     # flip to false after dogfood A
 state_dir = "/var/alchemist/state"
 max_issues_per_tick = 1            # global blast-radius cap for the first week
@@ -107,10 +108,11 @@ alchemist-timeout: 25m
 form. Overrides are bounded to 60-3600 seconds so a single issue cannot silently
 turn into an unbounded provider spend.
 
-Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
-`ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`,
-`ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
-`ALCHEMIST_MAX_CONCURRENT_REPOS`, `ALCHEMIST_CONDUCTOR_EFFORT`.
+Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL` (deprecated: state-label
+prefix only, no longer a dispatch gate), `ALCHEMIST_DRY_RUN`, `ALCHEMIST_PROVIDER`,
+`ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`, `ALCHEMIST_MAX_ISSUES_PER_TICK`,
+`ALCHEMIST_MAX_PER_REPO_PER_TICK`, `ALCHEMIST_MAX_CONCURRENT_REPOS`,
+`ALCHEMIST_CONDUCTOR_EFFORT`.
 
 Required externally:
 - GitHub auth — either `GITHUB_TOKEN` with `issues:rw`, `pull_requests:rw`,
@@ -122,15 +124,13 @@ Required externally:
 
 ## Going live (the dogfood gates)
 
-Three transitions, each manual. The tool never auto-graduates.
+Two transitions, each manual. The tool never auto-graduates.
 
-1. **Dogfood A** — `dry_run=true`, label `alchemist-test`. File a tiny test issue.
+1. **Dogfood A** — `dry_run=true`. File a tiny test issue.
    Verify cron tick + log output. No side effects.
-2. **Dogfood B** — `dry_run=false`, label still `alchemist-test`. File one tiny
-   test issue. Real PR opens. Inspect and merge or reject.
-3. **Live** — flip `dispatch_label` to `alchemist-dispatch`. Keep
-   `max_issues_per_tick=1` and `max_concurrent_repos=1` for one week, then lift
-   them deliberately to enable cross-repo swarm.
+2. **Dogfood B / Live** — `dry_run=false`. Keep `max_issues_per_tick=1` and
+   `max_concurrent_repos=1` for one week, then lift them deliberately to enable
+   cross-repo swarm.
 
 Full operator walkthrough including Railway provisioning, common failure modes,
 and tuning knobs lives at [`docs/operator-runbook.md`](docs/operator-runbook.md).
