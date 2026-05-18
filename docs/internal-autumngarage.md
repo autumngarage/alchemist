@@ -22,8 +22,9 @@ Excluded from the first internal rollout:
 - `autumngarage/autumn-mail`: private app repo, not part of the core toolchain
   rollout.
 
-Alchemist still scans the org, so keep the deployment blocklist set even though
-the dispatch labels are only seeded on the watched repos.
+Alchemist scans the org for eligible open issues. Keep the deployment blocklist
+set so tap repos and private app repos stay out of the worker loop even when
+they have open issues.
 
 ## GitHub Labels
 
@@ -33,18 +34,19 @@ Seed or repair labels with:
 bash scripts/setup-autumngarage-internal.sh --execute
 ```
 
-The script is idempotent and dry-runs by default. It creates both the live
-`alchemist-dispatch` state labels and the `alchemist-test` state labels.
-Applying `alchemist-dispatch` is the manual trigger; after that, the Railway
-cron owns the scan → branch → Conductor edit → PR → Touchstone merge-gate flow.
-Alchemist self-reports should use that same issue path; only narrow, safe
-self-fixes should receive the dispatch label automatically.
+The script is idempotent and dry-runs by default. It creates both historical
+label prefixes (`alchemist-dispatch` and `alchemist-test`) plus their derived
+state labels. Current Alchemist does not require a dispatch trigger label:
+Railway scans eligible open issues, skips issues with an Alchemist state label
+or `alchemist-skip`, then owns the branch → Conductor edit → PR → Touchstone
+merge-gate flow.
 
-Verify the live queue is idle before enabling the cron:
+Verify no issue is already queued or actively being worked before enabling the
+cron:
 
 ```bash
-gh search issues --owner autumngarage --label alchemist-dispatch --state open --archived=false
 gh search issues --owner autumngarage --label alchemist-working --state open --archived=false
+gh search issues --owner autumngarage --label alchemist-skip --state open --archived=false
 ```
 
 ## Railway Variables
@@ -54,10 +56,9 @@ profile:
 
 ```bash
 railway variable set ALCHEMIST_ORG=autumngarage --service alchemist-cron
-railway variable set ALCHEMIST_LABEL=alchemist-dispatch --service alchemist-cron
 railway variable set ALCHEMIST_DRY_RUN=false --service alchemist-cron
 railway variable set ALCHEMIST_PROVIDER=openrouter --service alchemist-cron
-railway variable set ALCHEMIST_CONDUCTOR_EFFORT=low --service alchemist-cron
+railway variable set ALCHEMIST_CONDUCTOR_EFFORT=medium --service alchemist-cron
 railway variable set 'ALCHEMIST_BUDGET=$2' --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
 railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=1 --service alchemist-cron
@@ -86,7 +87,8 @@ railway logs --service alchemist-cron --deployment
 ```
 
 The first healthy tick should pass all doctor checks and then report no work
-when no issue has the dispatch label.
+when every open issue is already state-labelled, marked `alchemist-skip`, or in
+a blocked repository.
 
 For a local env-parity check after Railway variables are set (this injects Railway vars into a local command; it does not execute inside the deployed container):
 
@@ -95,6 +97,5 @@ railway run --service alchemist-cron --no-local -- uv run alchemist doctor --jso
 ```
 
 Do not lift the caps until at least one internal issue has shipped through a
-merged `[alchemist]` PR on the live `alchemist-dispatch` label. Keep
-`max_issues_per_tick=1` and `max_concurrent_repos=1` for the first week of
-internal use.
+merged `[alchemist]` PR on the live Railway cron. Keep `max_issues_per_tick=1`
+and `max_concurrent_repos=1` for the first week of internal use.
