@@ -87,10 +87,18 @@ railway logs --service alchemist-cron --deployment
 The first healthy tick should pass all doctor checks and then report no work
 when no issue has the dispatch label.
 
-For a local env-parity check after Railway variables are set:
+For a local env-parity check after Railway variables are set, run from this
+source checkout (this reads Railway env vars but executes locally, not inside
+the deployed container):
 
 ```bash
-railway run --service alchemist-cron -- alchemist doctor --json
+railway run --service alchemist-cron --no-local -- uv run alchemist doctor --json
+```
+
+Use deployment logs and cron ticks to verify the deployed runtime:
+
+```bash
+railway logs --service alchemist-cron --deployment
 ```
 
 Do not lift the caps until at least one internal issue has shipped through a

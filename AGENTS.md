@@ -141,7 +141,8 @@ Alchemist ships two ways:
 - **Internal runtime:** deploy the Railway cron image from this repo with
   `railway up --service alchemist-cron --detach`. Verify with
   `railway logs --service alchemist-cron --deployment` and
-  `railway run --service alchemist-cron -- alchemist doctor --json`.
+  `railway run --service alchemist-cron --no-local -- uv run alchemist doctor --json`
+  (local env-parity check using Railway vars, not an in-container execution path).
 
 Rollback for the CLI is a new release or tap formula revert. Rollback for
 Railway is redeploying a previous working commit/image and restoring the prior
