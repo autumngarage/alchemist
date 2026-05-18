@@ -1017,7 +1017,7 @@ def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_
     assert repos_processed == ["autumngarage/cortex", "autumngarage/touchstone"]
 
 
-@pytest.mark.parametrize("stale_label", ["alchemist-test-error", "alchemist-test-declined"])
+@pytest.mark.parametrize("stale_label", ["alchemist-test-declined"])
 def test_state_label_filter_dispatches_only_unlabeled_issues(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_label: str
 ):
@@ -1058,6 +1058,35 @@ def test_state_label_filter_dispatches_only_unlabeled_issues(
 
     assert [r.issue_number for r in results] == [1]
     assert captured["pr_creates"] == []
+
+
+def test_error_labeled_issue_is_retried_via_working_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    issue = DispatchIssue(
+        number=5,
+        title="Retry after tool recovery",
+        body="",
+        url="https://github.com/autumngarage/touchstone/issues/5",
+        repository="autumngarage/touchstone",
+        updated_at="2026-05-06T21:00:00Z",
+        labels=("alchemist-test-error",),
+    )
+    captured = _stub_all_external(monkeypatch, issues=[issue])
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert [r.issue_number for r in results] == [5]
+    transitions = [
+        cmd for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert len(transitions) >= 2
+    first_add = transitions[0][transitions[0].index("--add-label") + 1]
+    first_remove = transitions[0][transitions[0].index("--remove-label") + 1]
+    assert first_add == "alchemist-test-working"
+    assert first_remove == "alchemist-test-error"
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
