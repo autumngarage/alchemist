@@ -118,12 +118,13 @@ def run_tick(config: Config) -> list[RunResult]:
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
         return [*sweep_results, _run_level_error(config, f"scan: {exc}")]
 
-    state_labels = {
-        label.lower()
-        for label in _state_labels(config.dispatch_label)
-        if label != config.dispatch_label
+    ignored_labels = {
+        _working_label(config.dispatch_label)[1].lower(),
+        _blocked_label(config.dispatch_label)[1].lower(),
+        _shipped_label(config.dispatch_label)[1].lower(),
+        _declined_label(config.dispatch_label)[1].lower(),
+        _SKIP_LABEL,
     }
-    ignored_labels = {*state_labels, _SKIP_LABEL}
     issues = [
         i for i in issues
         if {label.lower() for label in i.labels}.isdisjoint(ignored_labels)
