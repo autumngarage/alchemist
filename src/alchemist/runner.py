@@ -2048,7 +2048,11 @@ def _make_pr(
             return reconciled
         raise _GhError("pr-create: timeout, no PR found on reconciliation") from exc
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"gh pr create exit {result.returncode}"
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"gh pr create exit {result.returncode}"
+        )
         if _is_pr_already_exists_error(detail):
             parsed = _parse_pr_url_and_number(detail)
             if parsed is not None:
