@@ -26,6 +26,7 @@ def _config(tmp_path: Path, *, dry_run: bool = False) -> Config:
         max_issues_per_tick=1,
         max_per_repo_per_tick=1,
         max_concurrent_repos=1,
+        conductor_effort="low",
         conductor_timeout_sec=600,
         review_timeout_sec=900,
         github_token_env="GITHUB_TOKEN",

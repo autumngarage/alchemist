@@ -28,6 +28,7 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.max_issues_per_tick == 1
     assert cfg.max_per_repo_per_tick == 1
     assert cfg.max_concurrent_repos == 1
+    assert cfg.conductor_effort == "low"
     assert cfg.repo_blocklist == ()
 
 
@@ -118,6 +119,22 @@ def test_global_issue_cap_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert cfg.max_issues_per_tick == 4
 
 
+def test_conductor_effort_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_CONDUCTOR_EFFORT", "medium")
+    cfg = load_config()
+    assert cfg.conductor_effort == "medium"
+
+
+def test_conductor_effort_rejects_unknown_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_CONDUCTOR_EFFORT", "expensive")
+    with pytest.raises(ValueError, match="conductor_effort"):
+        load_config()
+
+
 def test_dry_run_string_coercion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
     monkeypatch.setenv("ALCHEMIST_DRY_RUN", "false")
@@ -138,6 +155,7 @@ def test_config_is_frozen():
         max_issues_per_tick=1,
         max_per_repo_per_tick=1,
         max_concurrent_repos=1,
+        conductor_effort="low",
         conductor_timeout_sec=600,
         review_timeout_sec=300,
         github_token_env="GITHUB_TOKEN",
