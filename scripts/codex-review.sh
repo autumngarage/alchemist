@@ -1705,8 +1705,28 @@ reviewer_conductor_auth_ok() {
   # Delegate to `conductor doctor --json` — cheap check, makes no upstream
   # calls, confirms at least one provider is configured.
   local doctor_json
-  doctor_json=$(conductor doctor --json 2>/dev/null) || return 1
-  echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'
+  doctor_json=$(conductor doctor --json 2>/dev/null) || doctor_json=""
+  if echo "$doctor_json" | grep -q '"configured"[[:space:]]*:[[:space:]]*true'; then
+    return 0
+  fi
+
+  reviewer_conductor_route_auth_ok
+}
+
+reviewer_conductor_route_auth_ok() {
+  local route_json provider
+  local -a args
+
+  if ! conductor route --help >/dev/null 2>&1; then
+    return 1
+  fi
+
+  args=(route --json --kind review)
+  [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
+  route_json="$(conductor "${args[@]}" 2>/dev/null)" || return 1
+  provider="$(conductor_route_json_string_field "$route_json" selected_provider)"
+  [ -n "$provider" ] || provider="$(conductor_route_json_string_field "$route_json" provider)"
+  [ -n "$provider" ]
 }
 
 conductor_inner_timeout() {
@@ -1890,6 +1910,14 @@ conductor_route_json_string_field() {
     | head -1
 }
 
+conductor_route_selected_provider() {
+  local json="$1"
+  local provider
+  provider="$(conductor_route_json_string_field "$json" selected_provider)"
+  [ -n "$provider" ] || provider="$(conductor_route_json_string_field "$json" provider)"
+  printf '%s' "$provider"
+}
+
 conductor_csv_contains() {
   local csv="$1"
   local wanted="$2"
@@ -1973,7 +2001,7 @@ conductor_route_preflight_for_phase() {
   route_rc=$?
   set -e
 
-  provider="$(conductor_route_json_string_field "$route_json" provider)"
+  provider="$(conductor_route_selected_provider "$route_json")"
   error="$(conductor_route_json_string_field "$route_json" error)"
   if [ -z "$error" ] && [ -s "$route_stderr" ]; then
     error="$(tr '\n' ' ' <"$route_stderr" | sed 's/[[:space:]][[:space:]]*/ /g')"
