@@ -18,8 +18,25 @@ title prefix so the audit trail in `git log` and PR lists is unambiguous.
 
 ## Status
 
-`run-once` is live in this repo alongside `banner`, `doctor`, and `scan`.
-For deployment/dogfood guidance, use the operator runbook:
+Alchemist runs as a remote Railway cron service, not as a long-lived local
+daemon. The local CLI is for setup, diagnostics, and one-off dry runs; the
+production path is Railway invoking `alchemist run-once --json` on its cron
+schedule.
+
+Use local `doctor` to check this checkout:
+
+```bash
+uv run alchemist doctor
+```
+
+Use Railway to check the deployed runtime:
+
+```bash
+railway run --service alchemist-cron -- alchemist doctor --json
+railway logs --service alchemist-cron --deployment
+```
+
+For deployment and dogfood guidance, use the operator runbook:
 [`docs/operator-runbook.md`](docs/operator-runbook.md).
 
 ## How it composes
