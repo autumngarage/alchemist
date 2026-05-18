@@ -38,6 +38,7 @@ class Config:
     max_concurrent_repos: int     # how many repos to fan out across in parallel
     conductor_effort: str
     conductor_timeout_sec: int
+    conductor_max_iterations: int
     review_timeout_sec: int
     github_token_env: str
     assignee_user: str  # GitHub username/login to assign to claimed issues
@@ -104,6 +105,10 @@ _DEFAULTS: dict[str, object] = {
     # Operators can raise this per deployment for harder issue queues.
     "conductor_effort": "low",
     "conductor_timeout_sec": 600,
+    # Conductor's default iteration cap can be too tight for larger fixes
+    # and causes avoidable meta-failures (`Reached --max-iterations cap`).
+    # Keep this bounded but comfortably above typical sessions.
+    "conductor_max_iterations": 30,
     # 15 minutes for touchstone's merge-pr.sh — it runs the AI code review
     # (which itself can take 1-3 min for substantive diffs) plus the squash-
     # merge + cleanup. Empirically, 300s sometimes timed out *after* the
@@ -222,6 +227,7 @@ def load_config() -> Config:
         "ALCHEMIST_MAX_CONCURRENT_REPOS": "max_concurrent_repos",
         "ALCHEMIST_CONDUCTOR_EFFORT": "conductor_effort",
         "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
+        "ALCHEMIST_CONDUCTOR_MAX_ITERATIONS": "conductor_max_iterations",
         "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
         "ALCHEMIST_ASSIGNEE": "assignee_user",
@@ -248,6 +254,7 @@ def load_config() -> Config:
         max_concurrent_repos=_coerce_int(merged["max_concurrent_repos"]),
         conductor_effort=_coerce_effort(merged["conductor_effort"]),
         conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
+        conductor_max_iterations=_coerce_int(merged["conductor_max_iterations"]),
         review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
         github_token_env=str(merged["github_token_env"]),
         assignee_user=str(merged["assignee_user"]),
