@@ -426,6 +426,10 @@ def test_conductor_timeout_records_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert r.error is not None
     assert "timeout" in r.error.lower()
     assert captured["pr_creates"] == []
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "alchemist hit an error" in body)
+    assert "Alchemist will retry this issue on a future tick." in error_body
+    assert "remove the `alchemist-error` label to retry" not in error_body
 
 
 def test_issue_body_conductor_timeout_override_reaches_conductor(
