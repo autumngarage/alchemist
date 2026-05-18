@@ -340,6 +340,7 @@ def _process_locked(
             provider=config.default_provider,
             effort=config.conductor_effort,
             timeout=conductor_timeout_sec,
+            max_iterations=config.conductor_max_iterations,
             transcript_path=transcript_path,
             ndjson_path=ndjson_path,
         )
@@ -1375,6 +1376,7 @@ def _run_conductor(
     cwd: Path,
     provider: str,
     timeout: int,
+    max_iterations: int,
     transcript_path: Path,
     ndjson_path: Path,
     effort: str = "low",
@@ -1399,6 +1401,7 @@ def _run_conductor(
         "--brief-file", str(brief_path),
         "--cwd", str(cwd),
         "--timeout", str(timeout),
+        "--max-iterations", str(max_iterations),
         "--log-file", str(ndjson_path),
     ]
     grace_sec = min(
