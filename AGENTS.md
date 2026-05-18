@@ -139,9 +139,10 @@ Alchemist ships two ways:
   workflow. Verify with `brew update && brew upgrade alchemist` or by checking
   the tap commit and formula SHA.
 - **Internal runtime:** deploy the Railway cron image from this repo with
-  `railway up --service alchemist-cron --detach`. Verify with
-  `railway logs --service alchemist-cron --deployment` and
-  `railway run --service alchemist-cron -- alchemist doctor --json`.
+  `railway up --service alchemist-cron --detach`. Verify deployed behavior via
+  `railway logs --service alchemist-cron --deployment` (cron ticks, doctor output,
+  run-once results). For local env-parity in a source checkout, use
+  `railway run --service alchemist-cron --no-local -- uv run alchemist doctor --json`.
 
 Rollback for the CLI is a new release or tap formula revert. Rollback for
 Railway is redeploying a previous working commit/image and restoring the prior

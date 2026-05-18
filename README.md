@@ -29,11 +29,16 @@ Use local `doctor` to check this checkout:
 uv run alchemist doctor
 ```
 
-Use Railway to check the deployed runtime:
+Use Railway deployment logs to check the deployed runtime:
 
 ```bash
-railway run --service alchemist-cron -- alchemist doctor --json
 railway logs --service alchemist-cron --deployment
+```
+
+Use Railway vars for a local env-parity check from this source checkout:
+
+```bash
+railway run --service alchemist-cron --no-local -- uv run alchemist doctor --json
 ```
 
 For deployment and dogfood guidance, use the operator runbook:
