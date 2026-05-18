@@ -419,7 +419,12 @@ def _process_locked(
     # number and waits for the result. CLEAN review → squash-merged. BLOCKED
     # review → PR stays open with review comments; needs human triage.
     try:
-        merge_gate = _run_merge_pr(work_dir, pr_number, config.review_timeout_sec)
+        merge_gate = _run_merge_pr(
+            work_dir,
+            pr_number,
+            config.review_timeout_sec,
+            provider=config.default_provider,
+        )
     except _ToolError as exc:
         # merge-pr.sh subprocess died; the merge may have already landed.
         # Query the PR's actual state before reporting failure.
@@ -1682,7 +1687,13 @@ def _resolve_touchstone_root() -> Path:
     raise _ToolError("touchstone scripts/merge-pr.sh not found")
 
 
-def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> _MergeGateResult:
+def _run_merge_pr(
+    repo_dir: Path,
+    pr_number: int,
+    timeout: int,
+    *,
+    provider: str,
+) -> _MergeGateResult:
     """Hand the PR to touchstone's merge-pr.sh (review + auto-merge gate).
 
     Returns a classified result:
@@ -1703,6 +1714,9 @@ def _run_merge_pr(repo_dir: Path, pr_number: int, timeout: int) -> _MergeGateRes
         # this invocation so merge-pr.sh does not self-update that install.
         "TOUCHSTONE_NO_SCRIPT_SYNC": "1",
         "TOUCHSTONE_SCRIPT_SYNC_GUARD_DISABLE": "1",
+        # Pin Touchstone's conductor provider to Alchemist's configured
+        # provider unless the operator already set an explicit override.
+        "TOUCHSTONE_CONDUCTOR_WITH": os.environ.get("TOUCHSTONE_CONDUCTOR_WITH", provider),
     }
     try:
         result = subprocess.run(  # noqa: S603

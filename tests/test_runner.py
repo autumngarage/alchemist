@@ -833,6 +833,60 @@ def test_merge_infra_failure_is_fatal_with_pr_url(
     assert len(captured["pr_creates"]) == 1
 
 
+def test_run_merge_pr_passes_default_provider_to_touchstone_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist.runner import _run_merge_pr
+
+    seen_envs: list[dict[str, str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd, args
+        seen_envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("TOUCHSTONE_CONDUCTOR_WITH", raising=False)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "alchemist.runner._resolve_touchstone_root",
+        lambda: Path("/opt/homebrew/opt/touchstone/libexec"),
+    )
+
+    result = _run_merge_pr(tmp_path, 123, 60, provider="openrouter")
+
+    assert result.merged is True
+    assert result.error is None
+    assert len(seen_envs) == 1
+    assert seen_envs[0]["TOUCHSTONE_CONDUCTOR_WITH"] == "openrouter"
+
+
+def test_run_merge_pr_respects_operator_touchstone_provider_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from alchemist.runner import _run_merge_pr
+
+    seen_envs: list[dict[str, str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = cmd, args
+        seen_envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("TOUCHSTONE_CONDUCTOR_WITH", "claude")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "alchemist.runner._resolve_touchstone_root",
+        lambda: Path("/opt/homebrew/opt/touchstone/libexec"),
+    )
+
+    result = _run_merge_pr(tmp_path, 123, 60, provider="openrouter")
+
+    assert result.merged is True
+    assert result.error is None
+    assert len(seen_envs) == 1
+    assert seen_envs[0]["TOUCHSTONE_CONDUCTOR_WITH"] == "claude"
+
+
 def test_merge_pr_script_missing_records_nonfatal_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
