@@ -100,9 +100,9 @@ _DEFAULTS: dict[str, object] = {
     "max_issues_per_tick": 1,
     "max_per_repo_per_tick": 1,
     "max_concurrent_repos": 1,
-    # Unattended cron should start with bounded provider spend and latency.
-    # Operators can raise this per deployment for harder issue queues.
-    "conductor_effort": "low",
+    # Default to medium so small retries still have enough worker-loop headroom
+    # to reach validation/PR handoff in unattended cron.
+    "conductor_effort": "medium",
     "conductor_timeout_sec": 600,
     # 15 minutes for touchstone's merge-pr.sh — it runs the AI code review
     # (which itself can take 1-3 min for substantive diffs) plus the squash-
