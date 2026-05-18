@@ -2,6 +2,10 @@
 
 How to deploy, dogfood, and run alchemist for one GitHub org.
 
+Alchemist's normal operating mode is remote: a Railway cron service runs
+`alchemist run-once --json` on schedule. Local commands are for setup,
+diagnostics, and ad-hoc verification; they are not the production daemon.
+
 This document is the canonical reference for an operator setting up alchemist for the first time, walking through the dogfood gates, going live, and handling the common failure modes. If you're a new operator: read top-to-bottom once, then keep this open while you work the dogfood ramp.
 
 For the Autumn Garage internal deployment profile, including the watched repo
@@ -42,7 +46,11 @@ Use the existing `autumn-alchemist` App registration at https://github.com/apps/
 
 Each Railway deployment scopes to one installation (one org). For multi-org operators, run multiple deployments.
 
-The runtime mints a fresh installation access token every tick (~1-hour TTL, but we don't cache across ticks — the cron entrypoint is `GITHUB_TOKEN=$(alchemist auth-token) alchemist run-once`). When App env vars are unset, alchemist falls back to Path A's PAT for backwards compat.
+The runtime mints a fresh installation access token every tick (~1-hour TTL,
+but we don't cache across ticks). The Railway entrypoint runs
+`alchemist run-once --json`; the CLI mints and exports the token internally
+before it shells out to `gh` or `git`. When App env vars are unset, alchemist
+falls back to Path A's PAT for backwards compatibility.
 
 ### 2. Get an OpenRouter API key
 
