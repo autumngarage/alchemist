@@ -41,7 +41,7 @@ class Config:
     review_timeout_sec: int
     github_token_env: str
     assignee_user: str  # GitHub username/login to assign to claimed issues
-    repo_blocklist: tuple[str, ...]  # repos in the org to skip even if labelled
+    repo_blocklist: tuple[str, ...]  # repos in the org to skip during intake
 
     # GitHub App auth (v0.2 / alchemist#6). When all three are present alchemist
     # mints a per-tick installation token; otherwise it falls back to the PAT
@@ -115,10 +115,10 @@ _DEFAULTS: dict[str, object] = {
     # PAT owner for v0.1; swap to autumn-alchemist[bot] in v0.2 (alchemist#6).
     "assignee_user": "@me",
     # Comma-separated repo names ("owner/name" or just "name" within the
-    # configured org) to skip even when labelled. For repos that need local
-    # testing, customer-sensitive repos, or anything else alchemist shouldn't
-    # touch. Stored as a tuple in the resolved Config; the env-var override
-    # is comma-separated.
+    # configured org) to skip even when they have eligible open issues. For
+    # repos that need local testing, customer-sensitive repos, or anything else
+    # alchemist shouldn't touch. Stored as a tuple in the resolved Config; the
+    # env-var override is comma-separated.
     "repo_blocklist": "",
     # GitHub App auth — empty by default; v0.2 deployments fill these in.
     "app_id": "",

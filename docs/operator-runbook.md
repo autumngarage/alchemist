@@ -13,7 +13,16 @@ scope and deployment blocklist, see [`docs/internal-autumngarage.md`](internal-a
 
 ## Architecture (in one paragraph)
 
-Alchemist is a Railway cron service. Every 5 minutes it queries one GitHub org for issues labelled `alchemist-dispatch`, dispatches each found issue to [Conductor](https://github.com/autumngarage/conductor)'s agentic loop on a fresh feature branch, opens a PR, then hands the PR to [Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` — which runs the AI code-review gate and squash-merges on a CLEAN verdict. BLOCKED reviews leave the PR open with comments for human triage. Alchemist signs all commits as `Alchemist <alchemist@autumngarage.dev>` and prefixes PR titles with `[alchemist]` for audit visibility.
+Alchemist is a Railway cron service. Every 5 minutes it queries one GitHub org
+for eligible open issues, skips issues already carrying an Alchemist state label
+or `alchemist-skip`, dispatches one bounded issue to
+[Conductor](https://github.com/autumngarage/conductor)'s agentic loop on a
+fresh feature branch, opens a PR, then hands the PR to
+[Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` — which
+runs the AI code-review gate and squash-merges on a CLEAN verdict. BLOCKED
+reviews leave the PR open with comments for human triage. Alchemist signs all
+commits as `Alchemist <alchemist@autumngarage.dev>` and prefixes PR titles with
+`[alchemist]` for audit visibility.
 
 Alchemist composes by file/CLI contract — never by code import. It owns GitHub I/O, git plumbing, per-repo locking, and label state. It does NOT own LLM judgment (Conductor) or quality review (Touchstone).
 
@@ -81,8 +90,7 @@ railway variable set ALCHEMIST_ORG="$YOUR_ORG" --service alchemist-cron
 
 # Safety defaults — override during the dogfood ramp:
 railway variable set ALCHEMIST_DRY_RUN=true --service alchemist-cron
-railway variable set ALCHEMIST_CONDUCTOR_EFFORT=low --service alchemist-cron
-railway variable set ALCHEMIST_LABEL=alchemist-test --service alchemist-cron
+railway variable set ALCHEMIST_CONDUCTOR_EFFORT=medium --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
 railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=1 --service alchemist-cron
 ```
@@ -92,7 +100,7 @@ To verify auth before deploying, run `alchemist auth-token` locally with the sam
 Optional but recommended:
 
 ```bash
-# Repos to skip even if labelled — comma-separated, can be bare names
+# Repos to skip even when they have eligible open issues — comma-separated, can be bare names
 # (auto-qualified with the org) or fully-qualified "owner/name".
 railway variable set ALCHEMIST_REPO_BLOCKLIST="local-only-repo,sensitive-repo" --service alchemist-cron
 ```
@@ -122,11 +130,11 @@ The first tick should show the alchemist banner + all 7 doctor checks green. If 
 
 The tool ships **disabled** by design. Three gates, removed manually one at a time, never auto-graduated.
 
-### Dogfood A — dry-run, test label
+### Dogfood A — dry-run
 
-**State:** `ALCHEMIST_DRY_RUN=true`, `ALCHEMIST_LABEL=alchemist-test`. Default after first deploy.
+**State:** `ALCHEMIST_DRY_RUN=true`. Default after first deploy.
 
-**What you do:** file 2-3 small test issues on watched repos labelled `alchemist-test`. Examples:
+**What you do:** file 2-3 small test issues on watched repos. Examples:
 - "Fix typo on line 12 of README.md: tranmute → transmute"
 - "Add missing trailing newline to docs/install.md"
 
@@ -141,38 +149,41 @@ If conductor declines (issue not actionable as a code change), you'll see `error
 
 **Move forward when:** at least one tick produced clean dry-run output for an actionable issue.
 
-### Dogfood B — live, test label
+### Dogfood B — live under tight caps
 
 **Switch:** `railway variable set ALCHEMIST_DRY_RUN=false --service alchemist-cron`
 
-**What changes:** dry-run is off. Real PRs open against real repos when conductor produces a diff. But only the **test label** is honored, so only your hand-filed test issues trigger the loop.
+**What changes:** dry-run is off. Real PRs open against real repos when
+Conductor produces a diff. `max_issues_per_tick=1`, `max_per_repo_per_tick=1`,
+and `max_concurrent_repos=1` keep the live blast radius bounded.
 
 **Pass criteria:** at least one test issue completes the full cycle. Opening a branch and PR alone does not count; a successful Dogfood B run must end in either a merged PR or a review-blocked PR with a clear Touchstone explanation.
-1. label transitions `alchemist-test → alchemist-test-working`
+1. label transitions to `alchemist-working`
 2. PR opens, titled `[alchemist] fix: <issue title> (#<N>)`, signed `Alchemist <alchemist@autumngarage.dev>`
 3. touchstone's `merge-pr.sh` runs the AI review
-4. CLEAN review → squash-merge → label transitions to `-shipped`
-   OR BLOCKED review → PR stays open, label stays `-working`, comment posted
+4. CLEAN review → squash-merge → label transitions to `alchemist-shipped`
+   OR BLOCKED review → PR stays open, label transitions to `alchemist-blocked`, comment posted
 5. issue auto-closes (via the PR's `Closes` reference)
 
 **Move forward when:** at least one issue made it to `-shipped`. Inspect the merged commit; verify the diff is what you expected.
 
-### Live — real label
+### Live — production intake
 
-**Switch:** `railway variable set ALCHEMIST_LABEL=alchemist-dispatch --service alchemist-cron`
-
-Optional: pre-create the `alchemist-dispatch` label set on each watched repo (alchemist auto-creates on first scan, but pre-creating avoids any first-tick weirdness):
+Optional: pre-create the Alchemist state-label set on each watched repo
+(Alchemist auto-creates on first scan, but pre-creating avoids any first-tick
+weirdness):
 
 ```bash
 for repo in <your-org>/<repo1> <your-org>/<repo2> ...; do
   for suffix in "" -working -shipped -declined -error; do
-    gh label create "alchemist-dispatch$suffix" --repo "$repo" \
+    gh label create "alchemist$suffix" --repo "$repo" \
       --color ffd787 --description "Alchemist state" --force
   done
 done
 ```
 
-**What changes:** real users on the org can label any issue `alchemist-dispatch` to trigger the loop.
+**What changes:** Alchemist processes eligible open issues without a trigger
+label. Use `alchemist-skip` for issues that should remain human-only.
 
 **For the first week, keep:** `max_issues_per_tick=1`, `max_per_repo_per_tick=1`, and `max_concurrent_repos=1` (the defaults). Bounds blast radius if a brief-rendering bug or prompt-injection slips through.
 
@@ -194,7 +205,9 @@ A tick crashed mid-flow (Railway restart, OOM, network blip during conductor exe
 
 **Self-heal:** every tick runs a sweep that transitions `-working` issues older than 30 minutes back to `-error`. Wait one tick after 30 min has elapsed.
 
-**Manual override:** if you need to retry sooner, re-label the issue back to the dispatch label. The next scan picks it up.
+**Manual override:** if you need to retry sooner, remove the `-working` state
+label and let the next scan pick it up, or mark it `alchemist-skip` if it should
+stay human-only.
 
 ### `merge-pr.sh` timeout, but the PR actually merged
 
@@ -267,17 +280,17 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | Env var | Default | Purpose |
 |---|---|---|
 | `ALCHEMIST_ORG` | `autumngarage` | The single GitHub org this deployment scopes to |
-| `ALCHEMIST_LABEL` | `alchemist-test` | Dispatch label trigger |
+| `ALCHEMIST_LABEL` | `alchemist` | Deprecated compatibility knob; state-label prefix, not an intake trigger |
 | `ALCHEMIST_DRY_RUN` | `true` | Skip mutations (no push, PR, label transitions) |
 | `ALCHEMIST_PROVIDER` | `openrouter` | Conductor provider for the agent loop |
-| `ALCHEMIST_CONDUCTOR_EFFORT` | `low` | Conductor effort for unattended issue work; raise deliberately for harder queues |
+| `ALCHEMIST_CONDUCTOR_EFFORT` | `medium` | Conductor effort for unattended issue work; raise deliberately for harder queues |
 | `ALCHEMIST_BUDGET` | `$2` | Per-issue cost cap (USD); `$0` or empty disables |
 | `ALCHEMIST_MAX_ISSUES_PER_TICK` | `1` | Global issues mutated per tick, including stuck sweeps |
 | `ALCHEMIST_MAX_PER_REPO_PER_TICK` | `1` | Issues from one repo per tick |
 | `ALCHEMIST_MAX_CONCURRENT_REPOS` | `1` | Repos processed in parallel (cross-repo swarm) |
 | `ALCHEMIST_CONDUCTOR_TIMEOUT_SEC` | `600` | Default hard timeout on `conductor exec`; issue body can override one run with `alchemist-timeout: 25m` |
 | `ALCHEMIST_REVIEW_TIMEOUT_SEC` | `900` | Hard timeout on `merge-pr.sh` |
-| `ALCHEMIST_REPO_BLOCKLIST` | `""` | Comma-separated repos to skip even when labelled |
+| `ALCHEMIST_REPO_BLOCKLIST` | `""` | Comma-separated repos to skip even when they have eligible open issues |
 | `ALCHEMIST_ASSIGNEE` | `@me` | GitHub user to assign to claimed issues when using PAT auth; App-auth deployments skip assignment and rely on the claim comment |
 | `ALCHEMIST_STATE_DIR` | `/var/alchemist/state` | Persistent state location (Railway volume) |
 
