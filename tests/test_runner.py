@@ -1229,6 +1229,33 @@ def test_make_pr_already_exists_reconciles_existing_pr(monkeypatch: pytest.Monke
     )
 
 
+def test_make_pr_already_exists_uses_url_in_gh_error_output(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _make_pr
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=["gh", "pr", "create"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                'a pull request for branch "alchemist/issue-7" into branch "main" '
+                "already exists:\n"
+                "https://github.com/autumngarage/touchstone/pull/174"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "alchemist.runner._find_pr_for_head",
+        lambda repo, head: (_ for _ in ()).throw(AssertionError("should not reconcile")),
+    )
+
+    assert _make_pr("autumngarage/touchstone", "main", "alchemist/issue-7", "t", "b") == (
+        "https://github.com/autumngarage/touchstone/pull/174",
+        174,
+    )
+
+
 def test_make_pr_already_exists_without_reconciliation_raises_gh_error(
     monkeypatch: pytest.MonkeyPatch,
 ):

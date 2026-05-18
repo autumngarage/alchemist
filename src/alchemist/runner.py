@@ -2021,6 +2021,13 @@ def _is_pr_already_exists_error(message: str) -> bool:
     return "pull request for branch" in lower and "already exists" in lower
 
 
+def _parse_pr_url_and_number(text: str) -> tuple[str, int] | None:
+    match = re.search(r"https://github\.com/[^\s]+/pull/(\d+)", text)
+    if not match:
+        return None
+    return match.group(0), int(match.group(1))
+
+
 def _make_pr(
     repo: str, base: str, head: str, title: str, body: str
 ) -> tuple[str, int]:
@@ -2043,16 +2050,18 @@ def _make_pr(
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"gh pr create exit {result.returncode}"
         if _is_pr_already_exists_error(detail):
+            parsed = _parse_pr_url_and_number(detail)
+            if parsed is not None:
+                return parsed
             reconciled = _find_pr_for_head(repo, head)
             if reconciled is not None:
                 return reconciled
         raise _GhError(detail)
     url = result.stdout.strip().splitlines()[-1]
-    # The URL ends in /pull/<N>; pull the number out so we can hand it to merge-pr.sh.
-    match = re.search(r"/pull/(\d+)", url)
-    if not match:
+    parsed = _parse_pr_url_and_number(url)
+    if parsed is None:
         raise _GhError(f"could not parse PR number from gh output: {url!r}")
-    return url, int(match.group(1))
+    return parsed
 
 
 def _post_activity_comment(
