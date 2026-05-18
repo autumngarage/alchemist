@@ -1017,9 +1017,8 @@ def test_repo_blocklist_skips_listed_repos(monkeypatch: pytest.MonkeyPatch, tmp_
     assert repos_processed == ["autumngarage/cortex", "autumngarage/touchstone"]
 
 
-@pytest.mark.parametrize("stale_label", ["alchemist-test-error", "alchemist-test-declined"])
 def test_state_label_filter_dispatches_only_unlabeled_issues(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_label: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     issues = [
         _issue(num=1, repo="autumngarage/touchstone"),
@@ -1043,12 +1042,12 @@ def test_state_label_filter_dispatches_only_unlabeled_issues(
         ),
         DispatchIssue(
             number=4,
-            title=f"Carries a stale {stale_label}",
+            title="Previously declined",
             body="",
             url="https://github.com/autumngarage/touchstone/issues/4",
             repository="autumngarage/touchstone",
             updated_at="2026-05-06T23:30:00Z",
-            labels=(stale_label,),
+            labels=("alchemist-test-declined",),
         ),
     ]
     captured = _stub_all_external(monkeypatch, issues=issues)
@@ -1058,6 +1057,35 @@ def test_state_label_filter_dispatches_only_unlabeled_issues(
 
     assert [r.issue_number for r in results] == [1]
     assert captured["pr_creates"] == []
+
+
+def test_error_label_does_not_dead_letter_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    issues = [
+        DispatchIssue(
+            number=4,
+            title="Carries a stale error label",
+            body="",
+            url="https://github.com/autumngarage/touchstone/issues/4",
+            repository="autumngarage/touchstone",
+            updated_at="2026-05-06T23:30:00Z",
+            labels=("alchemist-test-error",),
+        ),
+    ]
+    captured = _stub_all_external(monkeypatch, issues=issues)
+    config = _config(tmp_path, dry_run=False, max_issues=10)
+
+    results = run_tick(config)
+
+    assert [r.issue_number for r in results] == [4]
+    assert any(
+        "--remove-label" in cmd
+        and "alchemist-test-error" in cmd
+        and "--add-label" in cmd
+        and "alchemist-test-working" in cmd
+        for cmd in captured["label_transitions"]
+    )
 
 
 def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
