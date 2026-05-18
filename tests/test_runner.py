@@ -846,6 +846,39 @@ def test_non_external_failure_self_files_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_conductor_iteration_cap_failure_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _self_file_failures
+
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    result = RunResult(
+        repo="autumngarage/conductor",
+        issue_number=448,
+        pr_url=None,
+        merged=None,
+        error=(
+            "conductor: exit 1; transcript tail:\n"
+            "[conductor] agent loop iteration cap: 60\n"
+            "conductor: OpenRouter code execution failed: "
+            "[conductor] Reached --max-iterations cap (60)."
+        ),
+        elapsed_sec=0.0,
+        dry_run=False,
+    )
+
+    monkeypatch.setattr(
+        "alchemist.runner._is_meta_self_issue_result",
+        lambda _result: (_ for _ in ()).throw(AssertionError("should not check meta issues")),
+    )
+    monkeypatch.setattr(
+        "alchemist.runner._self_file_failure",
+        lambda _result, _config: (_ for _ in ()).throw(AssertionError("should not self-file")),
+    )
+
+    _self_file_failures([result], _config(tmp_path, dry_run=False))
+
+
 def test_merge_infra_failure_is_fatal_with_pr_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

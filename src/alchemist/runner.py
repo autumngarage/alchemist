@@ -548,6 +548,8 @@ _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\bnetwork\b", re.IGNORECASE),
     re.compile(r"github api", re.IGNORECASE),
     re.compile(r"openrouter response was not json", re.IGNORECASE),
+    re.compile(r"\breached\s+--max-iterations\s+cap\b", re.IGNORECASE),
+    re.compile(r"\biteration cap hit at\b", re.IGNORECASE),
     re.compile(r"\bmerge-pr:\s*preflight failed\b", re.IGNORECASE),
     re.compile(r"reached --max-iterations cap", re.IGNORECASE),
     re.compile(r"iteration cap hit at", re.IGNORECASE),
