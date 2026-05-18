@@ -550,6 +550,7 @@ _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\bmerge-pr:\s*preflight failed\b", re.IGNORECASE),
     re.compile(r"reached --max-iterations cap", re.IGNORECASE),
     re.compile(r"iteration cap hit at", re.IGNORECASE),
+    re.compile(r"agent loop iteration cap", re.IGNORECASE),
 )
 _BENIGN_STUCK_SWEEP_RE = re.compile(
     r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
