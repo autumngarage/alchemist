@@ -1751,16 +1751,18 @@ def _run_merge_pr(
 
 
 def _classify_merge_pr_failure(output: str) -> str | None:
-    """Return None for intentional review blocks; otherwise a fatal reason."""
+    """Return None for intentional merge/review blocks; otherwise a fatal reason."""
     lower = output.lower()
     if "codex_review_blocked" in lower or "review blocked" in lower:
         return None
     if "push blocked" in lower and "conductor flagged issues" in lower:
         return None
+    if "mergestatestatus=dirty" in lower or "mergeable=conflicting" in lower:
+        return None
+    if "merge conflict" in lower or "not mergeable" in lower:
+        return None
     if "preflight" in lower:
         return "preflight failed"
-    if "merge conflict" in lower or "not mergeable" in lower:
-        return "merge conflict"
     if "gh:" in lower or "graphql" in lower or "api rate limit" in lower or "github api" in lower:
         return "github api failure"
     return "merge-pr.sh failed"
