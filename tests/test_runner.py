@@ -79,8 +79,9 @@ def _stub_all_external(
     push_create_failure: bool = False,
     pr_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
-    # "merged" | "blocked" | "preflight-failed" | "infra-error" | "missing" |
-    # "timeout-but-actually-merged" | "timeout-and-not-merged"
+    # "merged" | "blocked" | "dirty-conflict" | "preflight-failed" |
+    # "infra-error" | "missing" | "timeout-but-actually-merged" |
+    # "timeout-and-not-merged"
     merge_outcome: str = "merged",
 ):
     """Patch every subprocess.* + scanner + doctor used by the runner.
@@ -292,6 +293,17 @@ def _stub_all_external(
                     args=cmd,
                     returncode=1,
                     stdout="PUSH BLOCKED\nConductor flagged issues\nCODEX_REVIEW_BLOCKED\n",
+                    stderr="",
+                )
+            if merge_outcome == "dirty-conflict":
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout=(
+                        "=== > Checking merge state for PR #196 ...\n"
+                        "attempt 1: mergeStateStatus=DIRTY mergeable=CONFLICTING\n"
+                        "ERROR: PR #196 is DIRTY — has conflicts or is out of date with base.\n"
+                    ),
                     stderr="",
                 )
             if merge_outcome == "preflight-failed":
@@ -767,6 +779,28 @@ def test_merge_blocked_sets_blocked_label_and_posts_comment(
     assert "alchemist-test-blocked" in labels_added
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
     assert any("Touchstone blocked the merge" in b for b in bodies)
+
+
+def test_merge_dirty_conflict_sets_blocked_label_and_posts_comment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, merge_outcome="dirty-conflict")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.error is None
+    assert r.pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    assert r.merged is False
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-blocked" in labels_added
+    assert "alchemist-test-error" not in labels_added
 
 
 def test_merge_preflight_failure_is_fatal_with_pr_url(
