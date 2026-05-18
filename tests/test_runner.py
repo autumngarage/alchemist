@@ -282,6 +282,7 @@ def _stub_all_external(
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         if "bash" in cmd and any("merge-pr.sh" in str(c) for c in cmd):
+            captured["merge_env"] = kwargs.get("env", {})
             if merge_outcome in ("timeout-but-actually-merged", "timeout-and-not-merged"):
                 raise subprocess.TimeoutExpired(cmd, timeout=10)
             if merge_outcome == "merged":
@@ -1077,6 +1078,34 @@ def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, t
     assert len(results) == 1
     assert results[0].issue_number == 0
     assert results[0].error == "doctor: github auth: missing"
+
+
+def test_merge_gate_uses_configured_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.delenv("TOUCHSTONE_CONDUCTOR_WITH", raising=False)
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].merged is True
+    assert captured["merge_env"]["TOUCHSTONE_CONDUCTOR_WITH"] == config.default_provider
+
+
+def test_merge_gate_respects_explicit_touchstone_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch)
+    monkeypatch.setenv("TOUCHSTONE_CONDUCTOR_WITH", "codex")
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].merged is True
+    assert captured["merge_env"]["TOUCHSTONE_CONDUCTOR_WITH"] == "codex"
 
 
 def test_run_result_is_frozen():
