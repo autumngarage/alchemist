@@ -802,6 +802,32 @@ def test_merge_preflight_failure_does_not_self_file_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_iteration_cap_conductor_failure_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ToolError
+
+    monkeypatch.delenv("ALCHEMIST_DISABLE_SELF_FILE", raising=False)
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_conductor(**_: object) -> None:
+        raise _ToolError(
+            "exit 1; transcript tail:\n"
+            "[conductor] iteration cap hit at 20. Tool usage: Read=1 Edit=6 Bash=13\n"
+            "[conductor] Detected unfinished items:\n"
+            "  - Validation calls for `uv run ruff check`; not invoked in this session.\n"
+        )
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", fail_conductor)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_non_external_failure_self_files_meta_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
