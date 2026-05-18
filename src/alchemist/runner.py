@@ -2123,7 +2123,7 @@ def _post_error_comment(
             f"⚠️ alchemist hit an error: {reason}\n\n"
             f"Working branch: {branch_text}\n"
             f"{details_block}"
-            "Inspect the branch or remove the `alchemist-error` label to retry."
+            "Inspect the branch. Alchemist will retry on a future tick; apply `alchemist-skip` to opt out."
         ),
         config,
     )
