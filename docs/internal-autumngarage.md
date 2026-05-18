@@ -22,8 +22,8 @@ Excluded from the first internal rollout:
 - `autumngarage/autumn-mail`: private app repo, not part of the core toolchain
   rollout.
 
-Alchemist still scans the org, so keep the deployment blocklist set even though
-the dispatch labels are only seeded on the watched repos.
+Alchemist scans the full org for eligible open issues, so keep the deployment
+blocklist set for repos outside this rollout.
 
 ## GitHub Labels
 
@@ -33,17 +33,16 @@ Seed or repair labels with:
 bash scripts/setup-autumngarage-internal.sh --execute
 ```
 
-The script is idempotent and dry-runs by default. It creates both the live
-`alchemist-dispatch` state labels and the `alchemist-test` state labels.
-Applying `alchemist-dispatch` is the manual trigger; after that, the Railway
-cron owns the scan → branch → Conductor edit → PR → Touchstone merge-gate flow.
-Alchemist self-reports should use that same issue path; only narrow, safe
-self-fixes should receive the dispatch label automatically.
+The script is idempotent and dry-runs by default. It creates Alchemist's state
+labels (`alchemist-working`, `alchemist-blocked`, `alchemist-shipped`,
+`alchemist-declined`, `alchemist-error`) so transitions are visible from the
+first tick. The Railway cron owns the scan → branch → Conductor edit → PR →
+Touchstone merge-gate flow.
 
 Verify the live queue is idle before enabling the cron:
 
 ```bash
-gh search issues --owner autumngarage --label alchemist-dispatch --state open --archived=false
+gh search issues --owner autumngarage --state open --archived=false --json number,title,labels
 gh search issues --owner autumngarage --label alchemist-working --state open --archived=false
 ```
 
@@ -54,7 +53,7 @@ profile:
 
 ```bash
 railway variable set ALCHEMIST_ORG=autumngarage --service alchemist-cron
-railway variable set ALCHEMIST_LABEL=alchemist-dispatch --service alchemist-cron
+railway variable set ALCHEMIST_LABEL=alchemist --service alchemist-cron
 railway variable set ALCHEMIST_DRY_RUN=false --service alchemist-cron
 railway variable set ALCHEMIST_PROVIDER=openrouter --service alchemist-cron
 railway variable set ALCHEMIST_CONDUCTOR_EFFORT=low --service alchemist-cron
