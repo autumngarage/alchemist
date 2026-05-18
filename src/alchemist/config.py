@@ -36,6 +36,7 @@ class Config:
     max_issues_per_tick: int     # global issue cap across sweep + normal dispatch
     max_per_repo_per_tick: int   # how many issues to take from any one repo per tick
     max_concurrent_repos: int     # how many repos to fan out across in parallel
+    conductor_effort: str
     conductor_timeout_sec: int
     review_timeout_sec: int
     github_token_env: str
@@ -99,6 +100,9 @@ _DEFAULTS: dict[str, object] = {
     "max_issues_per_tick": 1,
     "max_per_repo_per_tick": 1,
     "max_concurrent_repos": 1,
+    # Unattended cron should start with bounded provider spend and latency.
+    # Operators can raise this per deployment for harder issue queues.
+    "conductor_effort": "low",
     "conductor_timeout_sec": 600,
     # 15 minutes for touchstone's merge-pr.sh — it runs the AI code review
     # (which itself can take 1-3 min for substantive diffs) plus the squash-
@@ -136,6 +140,17 @@ def _coerce_int(raw: object) -> int:
     if isinstance(raw, int):
         return raw
     return int(str(raw).strip())
+
+
+def _coerce_effort(raw: object) -> str:
+    effort = str(raw).strip().lower()
+    allowed = {"minimal", "low", "medium", "high", "max"}
+    if effort in allowed or effort.isdigit():
+        return effort
+    raise ValueError(
+        "conductor_effort must be one of minimal, low, medium, high, max, "
+        "or an integer token budget"
+    )
 
 
 def _coerce_repo_blocklist(raw: object, org: str) -> tuple[str, ...]:
@@ -205,6 +220,7 @@ def load_config() -> Config:
         "ALCHEMIST_MAX_ISSUES_PER_TICK": "max_issues_per_tick",
         "ALCHEMIST_MAX_PER_REPO_PER_TICK": "max_per_repo_per_tick",
         "ALCHEMIST_MAX_CONCURRENT_REPOS": "max_concurrent_repos",
+        "ALCHEMIST_CONDUCTOR_EFFORT": "conductor_effort",
         "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
         "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
@@ -230,6 +246,7 @@ def load_config() -> Config:
         max_issues_per_tick=_coerce_int(merged["max_issues_per_tick"]),
         max_per_repo_per_tick=_coerce_int(merged["max_per_repo_per_tick"]),
         max_concurrent_repos=_coerce_int(merged["max_concurrent_repos"]),
+        conductor_effort=_coerce_effort(merged["conductor_effort"]),
         conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
         review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
         github_token_env=str(merged["github_token_env"]),

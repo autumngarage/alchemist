@@ -76,6 +76,7 @@ org = "autumngarage"
 poll_interval_minutes = 5
 default_budget = "$2"
 default_provider = "openrouter"
+conductor_effort = "low"          # raise deliberately for harder issue queues
 dispatch_label = "alchemist-test"  # flip to "alchemist-dispatch" after dogfood
 dry_run = true                     # flip to false after dogfood A
 state_dir = "/var/alchemist/state"
@@ -104,7 +105,7 @@ turn into an unbounded provider spend.
 Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
 `ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`,
 `ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
-`ALCHEMIST_MAX_CONCURRENT_REPOS`.
+`ALCHEMIST_MAX_CONCURRENT_REPOS`, `ALCHEMIST_CONDUCTOR_EFFORT`.
 
 Required externally:
 - GitHub auth — either `GITHUB_TOKEN` with `issues:rw`, `pull_requests:rw`,

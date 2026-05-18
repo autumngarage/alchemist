@@ -337,6 +337,7 @@ def _process_locked(
             brief_path=brief_path,
             cwd=work_dir,
             provider=config.default_provider,
+            effort=config.conductor_effort,
             timeout=conductor_timeout_sec,
             transcript_path=transcript_path,
             ndjson_path=ndjson_path,
@@ -1368,6 +1369,7 @@ def _run_conductor(
     timeout: int,
     transcript_path: Path,
     ndjson_path: Path,
+    effort: str = "low",
 ) -> None:
     """Run conductor exec; on success, conductor's edits are present in cwd.
 
@@ -1384,7 +1386,7 @@ def _run_conductor(
     cmd = [
         "conductor", "exec",
         "--with", provider,
-        "--effort", "high",
+        "--effort", effort,
         "--tools", "Read,Edit,Write,Bash",
         "--brief-file", str(brief_path),
         "--cwd", str(cwd),

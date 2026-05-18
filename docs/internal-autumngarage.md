@@ -57,6 +57,7 @@ railway variable set ALCHEMIST_ORG=autumngarage --service alchemist-cron
 railway variable set ALCHEMIST_LABEL=alchemist-dispatch --service alchemist-cron
 railway variable set ALCHEMIST_DRY_RUN=false --service alchemist-cron
 railway variable set ALCHEMIST_PROVIDER=openrouter --service alchemist-cron
+railway variable set ALCHEMIST_CONDUCTOR_EFFORT=low --service alchemist-cron
 railway variable set 'ALCHEMIST_BUDGET=$2' --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
 railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=1 --service alchemist-cron

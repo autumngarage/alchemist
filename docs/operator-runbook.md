@@ -81,6 +81,7 @@ railway variable set ALCHEMIST_ORG="$YOUR_ORG" --service alchemist-cron
 
 # Safety defaults — override during the dogfood ramp:
 railway variable set ALCHEMIST_DRY_RUN=true --service alchemist-cron
+railway variable set ALCHEMIST_CONDUCTOR_EFFORT=low --service alchemist-cron
 railway variable set ALCHEMIST_LABEL=alchemist-test --service alchemist-cron
 railway variable set ALCHEMIST_STATE_DIR=/var/alchemist/state --service alchemist-cron
 railway variable set ALCHEMIST_MAX_ISSUES_PER_TICK=1 --service alchemist-cron
@@ -269,6 +270,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_LABEL` | `alchemist-test` | Dispatch label trigger |
 | `ALCHEMIST_DRY_RUN` | `true` | Skip mutations (no push, PR, label transitions) |
 | `ALCHEMIST_PROVIDER` | `openrouter` | Conductor provider for the agent loop |
+| `ALCHEMIST_CONDUCTOR_EFFORT` | `low` | Conductor effort for unattended issue work; raise deliberately for harder queues |
 | `ALCHEMIST_BUDGET` | `$2` | Per-issue cost cap (USD); `$0` or empty disables |
 | `ALCHEMIST_MAX_ISSUES_PER_TICK` | `1` | Global issues mutated per tick, including stuck sweeps |
 | `ALCHEMIST_MAX_PER_REPO_PER_TICK` | `1` | Issues from one repo per tick |

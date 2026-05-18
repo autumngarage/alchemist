@@ -35,6 +35,7 @@ def _config(
         max_issues_per_tick=max_issues,
         max_per_repo_per_tick=1,
         max_concurrent_repos=max_concurrent,
+        conductor_effort="low",
         conductor_timeout_sec=60,
         review_timeout_sec=60,
         github_token_env="GITHUB_TOKEN",
@@ -560,6 +561,38 @@ def test_run_conductor_failure_includes_transcript_tail(
     assert "transcript tail:" in message
     assert "root cause line" in message
     assert f"see {transcript}" in message
+
+
+def test_run_conductor_uses_configured_effort(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _run_conductor
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+    seen_cmd: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = args, kwargs
+        seen_cmd.extend(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_conductor(
+        brief_path=brief,
+        cwd=tmp_path,
+        provider="openrouter",
+        timeout=60,
+        effort="medium",
+        transcript_path=transcript,
+        ndjson_path=ndjson,
+    )
+
+    effort_index = seen_cmd.index("--effort")
+    assert seen_cmd[effort_index + 1] == "medium"
 
 
 def test_run_conductor_sanitizes_transcript_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
