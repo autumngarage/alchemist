@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from alchemist.briefs import BRIEF_TEMPLATE_VERSION, render_brief, render_pr_body
 from alchemist.doctor import run_doctor
-from alchemist.locks import LockBusyError, acquire, is_locked
+from alchemist.locks import LockBusyError, acquire, is_locked, stale_flock_lock_age
 from alchemist.reporter import report_tool_failure
 from alchemist.scanner import DispatchIssue, scan
 
@@ -61,6 +61,9 @@ _MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 _STUCK_SWEEP_MARGIN_SEC = 10 * 60
 _TARGET_DEP_PREP_TIMEOUT_SEC = 10 * 60
 _SKIP_LABEL = "alchemist-skip"
+_HEARTBEAT_INTERVAL_DEFAULT_SEC = 30
+_HEARTBEAT_INTERVAL_ENV = "ALCHEMIST_LOCK_HEARTBEAT_INTERVAL_SEC"
+_HEARTBEAT_STALE_AFTER_ENV = "ALCHEMIST_LOCK_HEARTBEAT_STALE_AFTER_SEC"
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
@@ -193,6 +196,7 @@ def _process_repo(
             repo,
             holder_note=note,
             stale_after_sec=_stuck_sweep_threshold_sec(config),
+            heartbeat_interval_sec=_lock_heartbeat_interval_sec(),
         ):
             return [_process_issue(issue, config) for issue in issues]
     except LockBusyError as exc:
@@ -242,6 +246,32 @@ def _stuck_sweep_threshold_sec(config: Config) -> int:
         _MIN_STUCK_SWEEP_THRESHOLD_SEC,
         config.conductor_timeout_sec + config.review_timeout_sec + _STUCK_SWEEP_MARGIN_SEC,
     )
+
+
+def _lock_heartbeat_interval_sec() -> int:
+    raw = os.environ.get(_HEARTBEAT_INTERVAL_ENV, "").strip()
+    if not raw:
+        return _HEARTBEAT_INTERVAL_DEFAULT_SEC
+    try:
+        value = int(raw)
+    except ValueError:
+        return _HEARTBEAT_INTERVAL_DEFAULT_SEC
+    return value if value > 0 else 0
+
+
+def _lock_heartbeat_stale_after_sec(config: Config) -> int:
+    raw = os.environ.get(_HEARTBEAT_STALE_AFTER_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    interval = _lock_heartbeat_interval_sec()
+    if interval <= 0:
+        return 0
+    return max(_stuck_sweep_threshold_sec(config), interval * 3)
 
 
 def _process_issue(issue: DispatchIssue, config: Config) -> RunResult:
@@ -748,6 +778,7 @@ def _sweep_stuck(config: Config) -> list[RunResult]:
     now = datetime.now(UTC)
     stale_after_sec = _stuck_sweep_threshold_sec(config)
     threshold = timedelta(seconds=stale_after_sec)
+    heartbeat_stale_after_sec = _lock_heartbeat_stale_after_sec(config)
     swept: list[RunResult] = []
     sweep_limit = max(0, config.max_issues_per_tick)
     for item in items:
