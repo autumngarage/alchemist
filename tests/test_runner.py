@@ -594,6 +594,8 @@ def test_run_conductor_uses_configured_effort(
 
     effort_index = seen_cmd.index("--effort")
     assert seen_cmd[effort_index + 1] == "medium"
+    max_iterations_index = seen_cmd.index("--max-iterations")
+    assert seen_cmd[max_iterations_index + 1] == "30"
 
 
 def test_run_conductor_sanitizes_transcript_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

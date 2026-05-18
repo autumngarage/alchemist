@@ -531,6 +531,10 @@ _CONDUCTOR_TIMEOUT_OVERRIDE_RE = re.compile(
 )
 _CONDUCTOR_TIMEOUT_MIN_SEC = 60
 _CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
+# Conductor defaults to a conservative iteration cap. Alchemist issues often
+# require reading project conventions + running validation, so allow a higher
+# ceiling to avoid premature `Reached --max-iterations cap` exits.
+_CONDUCTOR_MAX_ITERATIONS = 30
 # Conductor enforces its own --timeout internally. Give the subprocess wrapper
 # a bounded post-timeout grace so conductor can flush transcript/log output and
 # exit cleanly instead of being killed at +30s (observed in alchemist#132).
@@ -1392,6 +1396,7 @@ def _run_conductor(
         "conductor", "exec",
         "--with", provider,
         "--effort", effort,
+        "--max-iterations", str(_CONDUCTOR_MAX_ITERATIONS),
         "--tools", "Read,Edit,Write,Bash",
         "--brief-file", str(brief_path),
         "--cwd", str(cwd),
