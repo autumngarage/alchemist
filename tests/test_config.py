@@ -28,7 +28,7 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.max_issues_per_tick == 1
     assert cfg.max_per_repo_per_tick == 1
     assert cfg.max_concurrent_repos == 1
-    assert cfg.conductor_effort == "low"
+    assert cfg.conductor_effort == "medium"
     assert cfg.repo_blocklist == ()
 
 
