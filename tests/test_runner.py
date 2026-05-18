@@ -618,7 +618,7 @@ def test_run_conductor_subprocess_timeout_scales_with_conductor_timeout(
         ndjson_path=ndjson,
     )
 
-    assert seen_timeouts == [660]
+    assert seen_timeouts == [720]
 
 
 def test_run_conductor_subprocess_timeout_is_capped(
@@ -648,7 +648,7 @@ def test_run_conductor_subprocess_timeout_is_capped(
         ndjson_path=ndjson,
     )
 
-    assert seen_timeouts == [3720]
+    assert seen_timeouts == [3900]
 
 
 def test_conductor_error_comment_uses_collapsed_details_for_tail(

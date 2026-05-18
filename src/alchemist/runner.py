@@ -527,9 +527,11 @@ _CONDUCTOR_TIMEOUT_MIN_SEC = 60
 _CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
 # Conductor enforces its own --timeout internally. Give the subprocess wrapper
 # a bounded post-timeout grace so conductor can flush transcript/log output and
-# exit cleanly instead of being killed at +30s (observed in alchemist#132).
-_CONDUCTOR_SUBPROCESS_GRACE_MIN_SEC = 30
-_CONDUCTOR_SUBPROCESS_GRACE_MAX_SEC = 120
+# exit cleanly instead of being killed immediately after the internal deadline.
+# The original +10% grace (alchemist#132) still produced occasional hard kills
+# at +60s for default 10-minute runs (alchemist#158), so keep a wider floor.
+_CONDUCTOR_SUBPROCESS_GRACE_MIN_SEC = 120
+_CONDUCTOR_SUBPROCESS_GRACE_MAX_SEC = 300
 _META_REPO = "autumngarage/alchemist"
 _META_TITLE_PREFIX = "[alchemist-meta] failure: "
 _META_SIGNATURE_LEN = 12
