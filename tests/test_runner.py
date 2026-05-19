@@ -987,7 +987,7 @@ def test_no_diff_decline_does_not_self_file_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
-def test_budget_exceeded_does_not_self_file_meta_issue(
+def test_budget_exceeded_transitions_to_blocked_and_does_not_self_file_meta_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
@@ -1002,6 +1002,15 @@ def test_budget_exceeded_does_not_self_file_meta_issue(
 
     assert len(results) == 1
     assert results[0].error == "budget-exceeded: $2.07 spent vs $2.00 budgeted"
+    add_labels = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-blocked" in add_labels
+    assert "alchemist-test-error" not in add_labels
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("Further retries tend to increase spend" in body for body in bodies)
     assert captured["meta_issue_lists"] == []
     assert captured["meta_issue_creates"] == []
     assert captured["meta_issue_comments"] == []
