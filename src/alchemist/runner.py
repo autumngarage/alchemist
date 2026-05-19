@@ -1143,7 +1143,11 @@ def _is_external_failure(error: str) -> bool:
 
 
 def _is_expected_nonfailure_error(error: str) -> bool:
-    return error.strip().lower() == "conductor produced no diff"
+    normalized = error.strip().lower()
+    return (
+        normalized == "conductor produced no diff"
+        or normalized.startswith("budget-exceeded:")
+    )
 
 
 def _is_meta_issue_number(issue_number: int) -> bool:
