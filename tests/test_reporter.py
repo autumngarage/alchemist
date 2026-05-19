@@ -36,6 +36,7 @@ def _config(tmp_path: Path, *, dry_run: bool = False) -> Config:
         app_installation_id=None,
         app_private_key=None,
         app_private_key_path=None,
+        stall_escalate_after=3,
     )
 
 
