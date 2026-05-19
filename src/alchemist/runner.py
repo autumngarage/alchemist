@@ -556,6 +556,10 @@ _EXTERNAL_FAILURE_PATTERNS = (
 _BENIGN_STUCK_SWEEP_RE = re.compile(
     r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
 )
+_STATS_ERROR_RE = re.compile(
+    r"<!--\s*alchemist-stats:\s*attempt=(?P<attempt>\d+)\s+signature=(?P<signature>[0-9a-f]+)\s*-->"
+)
+_STATS_SUCCESS_RE = re.compile(r"<!--\s*alchemist-stats:\s*success\s*-->")
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -2108,6 +2112,8 @@ def _post_error_comment(
     config: Config,
     *,
     branch: str | None = None,
+    attempt_count: int,
+    signature: str,
 ) -> None:
     """Post a uniform error outcome comment for bail/error transitions."""
     reason, tail = _split_conductor_tail(message)
@@ -2131,7 +2137,8 @@ def _post_error_comment(
             f"Working branch: {branch_text}\n"
             f"{details_block}"
             "Alchemist will retry this issue on a future tick. Add "
-            "`alchemist-skip` if it should stay human-only."
+            "`alchemist-skip` if it should stay human-only.\n\n"
+            f"<!-- alchemist-stats: attempt={attempt_count} signature={signature} -->"
         ),
         config,
     )

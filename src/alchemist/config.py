@@ -52,6 +52,7 @@ class Config:
     app_installation_id: str | None
     app_private_key: str | None
     app_private_key_path: Path | None
+    stall_escalate_after: int = 3
 
     @property
     def github_token(self) -> str | None:
@@ -125,6 +126,7 @@ _DEFAULTS: dict[str, object] = {
     "app_installation_id": "",
     "app_private_key": "",
     "app_private_key_path": "",
+    "stall_escalate_after": 3,
 }
 
 
@@ -230,6 +232,7 @@ def load_config() -> Config:
         "ALCHEMIST_APP_INSTALLATION_ID": "app_installation_id",
         "ALCHEMIST_APP_PRIVATE_KEY": "app_private_key",
         "ALCHEMIST_APP_PRIVATE_KEY_PATH": "app_private_key_path",
+        "ALCHEMIST_STALL_ESCALATE_AFTER": "stall_escalate_after",
     }
     for env_name, key in env_overrides.items():
         if env_name in os.environ:
@@ -262,4 +265,5 @@ def load_config() -> Config:
             if str(merged["app_private_key_path"]).strip()
             else None
         ),
+        stall_escalate_after=max(1, _coerce_int(merged["stall_escalate_after"])),
     )

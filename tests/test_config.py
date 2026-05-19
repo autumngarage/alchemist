@@ -165,6 +165,7 @@ def test_config_is_frozen():
         app_installation_id=None,
         app_private_key=None,
         app_private_key_path=None,
+        stall_escalate_after=3,
     )
     from dataclasses import FrozenInstanceError
     with pytest.raises(FrozenInstanceError):

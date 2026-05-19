@@ -45,6 +45,7 @@ def _config(
         app_installation_id=None,
         app_private_key=None,
         app_private_key_path=None,
+        stall_escalate_after=3,
     )
 
 
