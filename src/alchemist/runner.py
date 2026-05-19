@@ -95,6 +95,7 @@ def run_tick(config: Config) -> list[RunResult]:
     issues stuck in `<dispatch>-working` for longer than 30 minutes back
     to an error state. Self-heals tick crashes that left labels orphaned.
     """
+    tick_started = time.monotonic()
     checks = run_doctor(config)
     failed = [c for c in checks if not c.ok]
     if failed:
@@ -157,7 +158,33 @@ def run_tick(config: Config) -> list[RunResult]:
                 results.extend([r for fut in futures for r in fut.result()])
 
     _self_file_failures(results, config)
+    _log_tick_summary(results, time.monotonic() - tick_started)
     return results
+
+
+def _log_tick_summary(results: list[RunResult], elapsed_sec: float) -> None:
+    """Emit one grep-friendly line per tick so Railway logs are easy to scan."""
+    shipped = sum(1 for r in results if r.merged is True)
+    blocked = sum(
+        1 for r in results
+        if r.merged is False and r.pr_url is not None and not r.error
+    )
+    errored = sum(1 for r in results if r.error and r.issue_number != 0)
+    declined = sum(
+        1 for r in results
+        if r.error and r.pr_url is None and r.merged is None
+        and r.error.strip().lower() == "conductor produced no diff"
+    )
+    fatal = sum(1 for r in results if r.error and r.issue_number == 0)
+    # Declines are counted in `errored` by the basic rule above; subtract so
+    # the buckets sum cleanly for operators.
+    errored -= declined
+    print(
+        f"alchemist tick: {len(results)} processed "
+        f"(shipped={shipped} blocked={blocked} errored={errored} "
+        f"declined={declined} fatal={fatal}) in {elapsed_sec:.1f}s",
+        file=sys.stderr,
+    )
 
 
 def _process_repo(
@@ -557,6 +584,11 @@ _BENIGN_STUCK_SWEEP_RE = re.compile(
     r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
 )
 _EXPECTED_BUDGET_EXCEEDED_RE = re.compile(r"\bbudget(?:\W|_)*exceeded\b", re.IGNORECASE)
+
+_ERROR_COMMENT_MARKER = "⚠️ alchemist hit an error"
+_STATS_MARKER_RE = re.compile(
+    r"<!--\s*alchemist-stats:\s*(?P<payload>[^>]*?)\s*-->"
+)
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -1039,6 +1071,111 @@ def _failure_signature(error: str) -> str:
     normalized = _normalize_error_for_signature(error)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return digest[:_META_SIGNATURE_LEN]
+
+
+@dataclass(frozen=True)
+class _PriorAttempts:
+    """Telemetry summary derived from prior `⚠️ alchemist hit an error` comments
+    on a single issue. Read-only: alchemist surfaces these in the next error
+    comment so operators can see the storm shape (count, cumulative cost,
+    whether the same failure keeps repeating) without re-reading the timeline."""
+
+    count: int
+    cumulative_cost_usd: float
+    last_signature: str | None
+
+
+def _scan_prior_attempts(repo: str, issue_number: int) -> _PriorAttempts:
+    """Count prior error-comment markers on an issue and sum embedded stats.
+
+    Best-effort: gh failures collapse to "no prior attempts." Operators read
+    these numbers off the next error comment, so a missed scan just means
+    "(attempt 1)" instead of the true count — never wrong-direction state.
+    """
+    cmd = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "comments",
+        "--jq", ".comments[].body",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd, capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return _PriorAttempts(count=0, cumulative_cost_usd=0.0, last_signature=None)
+    if result.returncode != 0:
+        return _PriorAttempts(count=0, cumulative_cost_usd=0.0, last_signature=None)
+
+    # gh's jq pipeline concatenates each comment body with its newlines
+    # preserved, so we can't split on a delimiter. Instead, scan the whole
+    # output for occurrences of the error marker (one per prior error comment)
+    # and walk every stats marker in order (one per error comment alchemist
+    # has written). The last marker's signature wins; cost markers are summed.
+    count = result.stdout.count(_ERROR_COMMENT_MARKER)
+    cost = 0.0
+    last_sig: str | None = None
+    for match in _STATS_MARKER_RE.finditer(result.stdout):
+        for token in match.group("payload").split():
+            key, _, value = token.partition("=")
+            if key == "cost_usd":
+                try:
+                    cost += float(value)
+                except ValueError:
+                    continue
+            elif key == "signature" and value:
+                last_sig = value
+    return _PriorAttempts(count=count, cumulative_cost_usd=cost, last_signature=last_sig)
+
+
+def _summarize_tool_calls(ndjson_path: Path) -> dict[str, int]:
+    """Count conductor `tool_call` events by tool name.
+
+    Returns {} when the log is missing/unreadable or has no tool calls. The
+    breakdown is the highest-signal triage view for "agent got stuck in a
+    dispatch loop" — e.g. `Bash=59 Read=1 Edit=0` says the model fell back
+    onto shell for everything instead of using structured tools.
+    """
+    if not ndjson_path.is_file():
+        return {}
+    counts: dict[str, int] = defaultdict(int)
+    try:
+        text = ndjson_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") != "tool_call":
+            continue
+        data = record.get("data") or {}
+        name = data.get("name") if isinstance(data, dict) else None
+        if isinstance(name, str) and name:
+            counts[name] += 1
+    return dict(counts)
+
+
+def _format_tool_call_summary(counts: dict[str, int]) -> str:
+    """Render `Read=1 Bash=59 Edit=0 Write=0` with deterministic ordering.
+
+    Known tools listed first in a stable order; any extras appended alphabetically.
+    Tools that fired zero times are shown so the absence is visible — that's
+    what makes `Edit=0` a useful tell vs `Bash=59`.
+    """
+    known = ("Read", "Edit", "Write", "Bash")
+    parts = [f"{name}={counts.get(name, 0)}" for name in known]
+    extras = sorted(name for name in counts if name not in known)
+    parts.extend(f"{name}={counts[name]}" for name in extras)
+    return " ".join(parts)
+
+
+def _ndjson_path_for(state_dir: Path, repo: str, issue_number: int) -> Path:
+    return state_dir / "transcripts" / f"{repo.replace('/', '-')}-{issue_number}.ndjson"
 
 
 def _failure_summary(error: str) -> str:
@@ -2105,38 +2242,73 @@ def _post_activity_comment(
 
 def _post_error_comment(
     repo: str,
-    issue_number: int,
+    issue: DispatchIssue,
     message: str,
     config: Config,
-    *,
-    branch: str | None = None,
 ) -> None:
-    """Post a uniform error outcome comment for bail/error transitions."""
-    reason, tail = _split_conductor_tail(message)
-    branch_text = branch or "(unknown)"
-    details_block = ""
+    """Post a uniform error outcome comment for bail/error transitions.
+
+    Reads prior `⚠️ alchemist hit an error` comments on the same issue to
+    surface attempt count, cumulative cost, and whether the failure signature
+    matches the previous one. The deterministic branch name is always included
+    so operators can inspect the working branch even when alchemist failed
+    before pushing.
+    """
+    sanitized = _sanitize_error_text(message, token=config.github_token)
+    reason, tail = _split_conductor_tail(sanitized)
+    signature = _failure_signature(sanitized)
+    branch = _branch_name(issue)
+    prior = _scan_prior_attempts(repo, issue.number)
+    attempt = prior.count + 1
+    ndjson_path = _ndjson_path_for(config.state_dir, repo, issue.number)
+    tool_counts = _summarize_tool_calls(ndjson_path)
+    run_cost = _extract_total_cost(ndjson_path)
+    cumulative_cost = prior.cumulative_cost_usd + (run_cost or 0.0)
+
+    lines: list[str] = []
+    header = f"⚠️ alchemist hit an error: {reason}"
+    if attempt > 1:
+        header = f"⚠️ alchemist hit an error (attempt {attempt}): {reason}"
+    lines.append(header)
+    lines.append("")
+    lines.append(f"Working branch: `{branch}`")
+    if attempt > 1 and prior.last_signature == signature:
+        lines.append(
+            "Same failure signature as the previous attempt "
+            f"(`{signature}`) — this looks like a stuck retry loop."
+        )
+    if tool_counts:
+        lines.append(f"Tool calls: {_format_tool_call_summary(tool_counts)}")
+    if run_cost is not None:
+        cost_line = f"Cost this run: ${run_cost:.2f}"
+        if attempt > 1 and cumulative_cost > 0:
+            cost_line += f" (cumulative across attempts: ${cumulative_cost:.2f})"
+        lines.append(cost_line)
     if tail:
-        details_block = (
+        lines.append(
             "\n<details>\n"
             "<summary>Conductor transcript tail</summary>\n\n"
             "```text\n"
             f"{tail}\n"
             "```\n\n"
-            "</details>\n"
+            "</details>"
         )
-
-    _post_activity_comment(
-        repo,
-        issue_number,
-        (
-            f"⚠️ alchemist hit an error: {reason}\n\n"
-            f"Working branch: {branch_text}\n"
-            f"{details_block}"
-            "Alchemist will retry this issue on a future tick. Add "
-            "`alchemist-skip` if it should stay human-only."
-        ),
-        config,
+    lines.append("")
+    lines.append(
+        "Alchemist will retry this issue on a future tick. Add "
+        "`alchemist-skip` if it should stay human-only."
     )
+    # Hidden machine-readable marker — parsed by future ticks to compute
+    # cumulative cost and detect signature repetition. Survives Markdown
+    # rendering as an HTML comment.
+    marker_parts = [f"attempt={attempt}", f"signature={signature}"]
+    if run_cost is not None:
+        marker_parts.append(f"cost_usd={run_cost:.4f}")
+    marker_parts.append(f"cumulative_cost_usd={cumulative_cost:.4f}")
+    lines.append("")
+    lines.append(f"<!-- alchemist-stats: {' '.join(marker_parts)} -->")
+
+    _post_activity_comment(repo, issue.number, "\n".join(lines), config)
 
 
 def _set_assignee(
@@ -2187,7 +2359,7 @@ def _mark_merge_gate_error(
     if not config.dry_run:
         _post_error_comment(
             repo,
-            issue.number,
+            issue,
             f"{error}\n\nPR remains open for human triage: {pr_url}",
             config,
         )
@@ -2239,27 +2411,32 @@ def _bail(
     *,
     branch: str | None = None,
 ) -> RunResult:
-    """Common error path: post a comment, transition to error label, return result."""
+    """Common error path: post a comment, transition to error label, return result.
+
+    The `branch` keyword is kept for backwards compatibility with call sites
+    that already had the branch handy; the comment itself always shows the
+    deterministic branch derived from the issue, regardless.
+    """
     message = _sanitize_error_text(message, token=config.github_token)
     label_error: str | None = None
-    visible_branch = branch if branch and message.startswith(("push:", "pr-create:")) else None
-    if visible_branch and message.startswith("pr-create:"):
-        reconciled = _find_pr_for_head(repo, visible_branch)
+    if branch and message.startswith("pr-create:"):
+        reconciled = _find_pr_for_head(repo, branch)
         if reconciled is not None:
             reconciled_url, reconciled_number = reconciled
             message = (
                 f"{message}; reconciliation: found existing PR "
                 f"{reconciled_url} (#{reconciled_number})"
             )
+    branch_for_result = branch or _branch_name(issue)
     if not config.dry_run:
-        _post_error_comment(repo, issue.number, message, config, branch=visible_branch)
+        _post_error_comment(repo, issue, message, config)
         try:
             _set_label(repo, issue.number, _error_label(config.dispatch_label), config)
         except _GhError as exc:
             label_error = f"label-transition: {exc}"
             print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
     error = f"{message}; {label_error}" if label_error else message
-    return _result(repo, issue.number, started, config, error=error, branch=visible_branch)
+    return _result(repo, issue.number, started, config, error=error, branch=branch_for_result)
 
 
 def _decline(
