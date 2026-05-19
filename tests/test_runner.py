@@ -1016,6 +1016,15 @@ def test_budget_exceeded_transitions_to_blocked_and_does_not_self_file_meta_issu
     assert captured["meta_issue_comments"] == []
 
 
+def test_expected_nonfailure_error_matches_embedded_budget_exceeded():
+    from alchemist.runner import _is_expected_nonfailure_error
+
+    assert _is_expected_nonfailure_error("budget-exceeded: $2.34 spent vs $2.00 budgeted")
+    assert _is_expected_nonfailure_error(
+        "unhandled: budget-exceeded: $2.34 spent vs $2.00 budgeted"
+    )
+
+
 def test_shipped_label_failure_is_visible_in_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
