@@ -61,9 +61,22 @@ _MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 _STUCK_SWEEP_MARGIN_SEC = 10 * 60
 _TARGET_DEP_PREP_TIMEOUT_SEC = 10 * 60
 _SKIP_LABEL = "alchemist-skip"
+_TRIAGE_TIMEOUT_SEC = 45
+_TRIAGE_MARKER_PREFIX = "alchemist-triage"
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
 _LABELS_ENSURED: set[tuple[str, str]] = set()
+
+
+class _OpenPr(TypedDict):
+    key: str
+    number: int
+    repository: str
+
+
+class _TriageDecision(TypedDict, total=False):
+    after: str
+    priority: str
 
 
 @dataclass(frozen=True)
@@ -140,7 +153,8 @@ def run_tick(config: Config) -> list[RunResult]:
                 )
         issues = [i for i in issues if i.repository not in config.repo_blocklist]
 
-    work = _select_work(issues, config, limit=remaining_issue_budget)
+    triage = _triage_queue(issues, _open_alchemist_prs(config.org), config)
+    work = _select_work(issues, config, limit=remaining_issue_budget, triage=triage)
 
     results: list[RunResult] = list(sweep_results)
     if work:
@@ -212,22 +226,41 @@ def _process_repo(
 
 
 def _select_work(
-    issues: list[DispatchIssue], config: Config, *, limit: int
+    issues: list[DispatchIssue],
+    config: Config,
+    *,
+    limit: int,
+    triage: dict[str, _TriageDecision] | None = None,
 ) -> list[tuple[str, list[DispatchIssue]]]:
-    """Select bounded work for this tick, preserving oldest-issue-first order.
+    """Select bounded work for this tick.
 
-    Invariant: the returned issue count never exceeds the global tick limit,
-    and no repo receives more than `max_per_repo_per_tick`.
+    Base order remains oldest-first, with optional triage adjustments:
+    - deferred issues (`after`) are skipped while dependency PR is open
+    - high-priority issues are lifted ahead of non-priority issues
     """
     total_limit = max(0, limit)
     per_repo_limit = max(0, config.max_per_repo_per_tick)
     if total_limit == 0 or per_repo_limit == 0:
         return []
 
+    triage_map = triage or {}
+    prioritized: list[DispatchIssue] = []
+    normal: list[DispatchIssue] = []
+    for issue in sorted(issues, key=lambda i: (i.updated_at, i.repository, i.number)):
+        key = _issue_key(issue.repository, issue.number)
+        decision = triage_map.get(key) or {}
+        after = str(decision.get("after") or "").strip()
+        if after and _is_issue_reference_open(after, issue.repository):
+            continue
+        if str(decision.get("priority") or "").strip().lower() == "high":
+            prioritized.append(issue)
+        else:
+            normal.append(issue)
+
     selected: dict[str, list[DispatchIssue]] = {}
     per_repo_counts: dict[str, int] = defaultdict(int)
     selected_count = 0
-    for issue in sorted(issues, key=lambda i: (i.updated_at, i.repository, i.number)):
+    for issue in [*prioritized, *normal]:
         if selected_count >= total_limit:
             break
         if per_repo_counts[issue.repository] >= per_repo_limit:
@@ -236,6 +269,236 @@ def _select_work(
         per_repo_counts[issue.repository] += 1
         selected_count += 1
     return list(selected.items())
+
+
+def _issue_key(repo: str, number: int) -> str:
+    return f"{repo}#{number}"
+
+
+def _triage_queue(
+    eligible: list[DispatchIssue],
+    open_prs: list[_OpenPr],
+    config: Config,
+) -> dict[str, _TriageDecision]:
+    if not eligible:
+        return {}
+
+    payload = {
+        "eligible": [
+            {
+                "key": _issue_key(issue.repository, issue.number),
+                "repository": issue.repository,
+                "number": issue.number,
+                "title": issue.title,
+                "updated_at": issue.updated_at,
+                "labels": list(issue.labels),
+            }
+            for issue in eligible
+        ],
+        "open_prs": open_prs,
+    }
+    prompt = (
+        "You are queue triage for alchemist. Return JSON only with shape "
+        "{\"decisions\": [{\"issue\": \"owner/repo#123\", "
+        "\"after\": \"owner/repo#122\"|\"\", "
+        "\"priority\": \"high\"|\"normal\"}]}. "
+        "Only include issues present in eligible. "
+        "Use after when issue should wait for another issue or PR to land. "
+        "Use high priority sparingly.\n\n"
+        f"Queue data:\n{json.dumps(payload, separators=(',', ':'))}"
+    )
+    cmd = [
+        "conductor", "ask",
+        "--kind", "code",
+        "--effort", "minimal",
+        "--brief", prompt,
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_TRIAGE_TIMEOUT_SEC,
+            check=False,
+            env=_conductor_env(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+
+    out = result.stdout.strip()
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+
+    decisions = data.get("decisions")
+    if not isinstance(decisions, list):
+        return {}
+
+    allowed = {_issue_key(i.repository, i.number) for i in eligible}
+    parsed: dict[str, _TriageDecision] = {}
+    for item in decisions:
+        if not isinstance(item, dict):
+            continue
+        issue_key = str(item.get("issue") or "").strip()
+        if issue_key not in allowed:
+            continue
+        decision: _TriageDecision = {}
+        after = str(item.get("after") or "").strip()
+        if after:
+            decision["after"] = after
+        priority = str(item.get("priority") or "").strip().lower()
+        if priority == "high":
+            decision["priority"] = "high"
+        if decision:
+            parsed[issue_key] = decision
+
+    if not parsed:
+        return {}
+
+    if not config.dry_run:
+        _persist_triage_markers(eligible, parsed, config)
+    return parsed
+
+
+def _persist_triage_markers(
+    eligible: list[DispatchIssue],
+    triage: dict[str, _TriageDecision],
+    config: Config,
+) -> None:
+    issue_by_key = {
+        _issue_key(issue.repository, issue.number): issue
+        for issue in eligible
+    }
+    for key, decision in triage.items():
+        issue = issue_by_key.get(key)
+        if issue is None:
+            continue
+        marker = _format_triage_marker(decision)
+        if not marker:
+            continue
+        _upsert_triage_marker(issue.repository, issue.number, marker, config)
+
+
+def _format_triage_marker(decision: _TriageDecision) -> str:
+    after = str(decision.get("after") or "").strip()
+    priority = str(decision.get("priority") or "").strip().lower()
+    parts: list[str] = []
+    if after:
+        parts.append(f"after={after}")
+    if priority == "high":
+        parts.append("priority=high")
+    if not parts:
+        return ""
+    return f"<!-- {_TRIAGE_MARKER_PREFIX}: {'; '.join(parts)} -->"
+
+
+def _upsert_triage_marker(repo: str, issue_number: int, marker: str, config: Config) -> None:
+    cmd_view = [
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "body",
+        "--jq", ".body",
+    ]
+    result = subprocess.run(cmd_view, capture_output=True, text=True, timeout=30)  # noqa: S603
+    if result.returncode != 0:
+        return
+    current = result.stdout
+    pattern = re.compile(
+        rf"<!--\s*{re.escape(_TRIAGE_MARKER_PREFIX)}:.*?-->\s*",
+        re.IGNORECASE,
+    )
+    stripped = pattern.sub("", current).rstrip()
+    new_body = f"{stripped}\n\n{marker}\n"
+    cmd_edit = [
+        "gh", "issue", "edit", str(issue_number),
+        "--repo", repo,
+        "--body", new_body,
+    ]
+    _ = config
+    subprocess.run(cmd_edit, capture_output=True, text=True, timeout=30)  # noqa: S603,S607
+
+
+def _open_alchemist_prs(org: str) -> list[_OpenPr]:
+    cmd = [
+        "gh", "search", "prs",
+        "--owner", org,
+        "--state", "open",
+        "--author", "autumn-alchemist[bot]",
+        "--json", "number,repository",
+        "--limit", "200",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    prs: list[_OpenPr] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("number")
+        repo_obj = item.get("repository") or {}
+        repo = repo_obj.get("nameWithOwner") or repo_obj.get("name") or ""
+        if not isinstance(number, int) or not isinstance(repo, str) or not repo:
+            continue
+        prs.append({"key": _issue_key(repo, number), "number": number, "repository": repo})
+    return prs
+
+
+def _is_issue_reference_open(ref: str, default_repo: str) -> bool:
+    parsed = _parse_issue_reference(ref, default_repo)
+    if parsed is None:
+        return False
+    repo, number = parsed
+    cmd = [
+        "gh", "issue", "view", str(number),
+        "--repo", repo,
+        "--json", "state",
+        "--jq", ".state",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603,S607
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip().upper() == "OPEN"
+
+
+def _parse_issue_reference(ref: str, default_repo: str) -> tuple[str, int] | None:
+    text = ref.strip()
+    match_full = re.fullmatch(r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)", text)
+    if match_full:
+        return match_full.group("repo"), int(match_full.group("num"))
+    match_short = re.fullmatch(r"#(?P<num>\d+)", text)
+    if match_short:
+        return default_repo, int(match_short.group("num"))
+    return None
 
 
 def _stuck_sweep_threshold_sec(config: Config) -> int:
