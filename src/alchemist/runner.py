@@ -1146,7 +1146,7 @@ def _is_expected_nonfailure_error(error: str) -> bool:
     normalized = error.strip().lower()
     return (
         normalized == "conductor produced no diff"
-        or normalized.startswith("budget-exceeded:")
+        or "budget-exceeded:" in normalized
     )
 
 
