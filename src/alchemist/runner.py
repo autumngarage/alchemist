@@ -351,7 +351,7 @@ def _process_locked(
 
     budget_problem = _check_budget(ndjson_path, config.default_budget)
     if budget_problem:
-        return _bail(repo, issue, started, config, f"budget-exceeded: {budget_problem}")
+        return _block_budget_exceeded(repo, issue, started, config, budget_problem)
 
     if not _has_changes(work_dir):
         return _decline(
@@ -2196,6 +2196,36 @@ def _mark_merge_gate_error(
             print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
             error = f"{error}; {label_error}"
     return error
+
+
+def _block_budget_exceeded(
+    repo: str,
+    issue: DispatchIssue,
+    started: float,
+    config: Config,
+    budget_problem: str,
+) -> RunResult:
+    """Budget overruns are terminal for this issue attempt: move to blocked."""
+    message = f"budget-exceeded: {budget_problem}"
+    label_error: str | None = None
+    if not config.dry_run:
+        _post_activity_comment(
+            repo,
+            issue.number,
+            (
+                f"⏸ alchemist stopped: {message}\n\n"
+                "Further retries tend to increase spend. This issue now needs "
+                "human triage before re-dispatch."
+            ),
+            config,
+        )
+        try:
+            _set_label(repo, issue.number, _blocked_label(config.dispatch_label), config)
+        except _GhError as exc:
+            label_error = f"label-transition: {exc}"
+            print(f"alchemist: {repo}#{issue.number}: {label_error}", file=sys.stderr)
+    error = f"{message}; {label_error}" if label_error else message
+    return _result(repo, issue.number, started, config, error=error)
 
 
 def _bail(
