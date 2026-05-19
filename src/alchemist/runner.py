@@ -1278,7 +1278,7 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
 
 def _make_branch(dest: Path, branch: str, base: str) -> None:
     subprocess.run(  # noqa: S603,S607
-        ["git", "checkout", "-B", branch, base],
+        ["git", "checkout", "-B", branch, f"origin/{base}"],
         cwd=dest, check=True, timeout=30,
     )
 
