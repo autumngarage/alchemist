@@ -768,6 +768,36 @@ def test_merge_preflight_failure_does_not_self_file_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_tool_call_leak_failure_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    captured = _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+
+    from alchemist.runner import _self_file_failures
+
+    result = RunResult(
+        repo="autumngarage/conductor",
+        issue_number=477,
+        pr_url=None,
+        merged=None,
+        error=(
+            "conductor: exit 1; transcript tail:\n"
+            "[conductor] Edit rejected for tests/test_openrouter.py: "
+            "tool-call leak detected. Re-emit the write with the actual file content."
+        ),
+        elapsed_sec=0.0,
+        dry_run=False,
+    )
+
+    _self_file_failures([result], config)
+
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_non_external_failure_self_files_meta_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
