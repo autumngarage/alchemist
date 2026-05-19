@@ -1220,6 +1220,45 @@ def test_pr_create_failure_reports_working_branch_visibility(
     assert f"Working branch: {results[0].branch}" in error_body
 
 
+def test_pr_create_no_commits_between_recovers_to_shipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured = _stub_all_external(monkeypatch, pr_create_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    monkeypatch.setattr(
+        "alchemist.runner._recover_pr_create_no_commits",
+        lambda repo, branch, error: {
+            "url": "https://github.com/autumngarage/touchstone/pull/9001",
+            "number": 9001,
+            "state": "MERGED",
+            "mergedAt": "2026-05-19T05:53:55Z",
+        },
+    )
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is None
+    assert results[0].merged is True
+    assert results[0].pr_url == "https://github.com/autumngarage/touchstone/pull/9001"
+    labels_added = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-shipped" in labels_added
+
+
+def test_is_no_commits_between_error_matches_gh_graphql_shape():
+    from alchemist.runner import _is_no_commits_between_error
+
+    assert _is_no_commits_between_error(
+        "GraphQL: No commits between main and alchemist/issue-104 (...) (createPullRequest)"
+    )
+    assert not _is_no_commits_between_error("GraphQL: API rate limit exceeded")
+
+
 # --------------------------------------------------------------------------- #
 # Label auto-creation (alchemist#19)                                          #
 # --------------------------------------------------------------------------- #

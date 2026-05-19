@@ -400,6 +400,33 @@ def _process_locked(
     try:
         pr_url, pr_number = _make_pr(repo, default_branch, branch, pr_title, body)
     except _GhError as exc:
+        recovered = _recover_pr_create_no_commits(repo, branch, str(exc))
+        if recovered is not None and recovered["mergedAt"] is not None:
+            pr_url = recovered["url"]
+            _post_activity_comment(
+                repo,
+                issue.number,
+                f"✅ alchemist shipped — reconciled merged PR {pr_url}",
+                config,
+            )
+            shipped_label_error = None
+            try:
+                _set_label(repo, issue.number, _shipped_label(config.dispatch_label), config)
+            except _GhError as label_exc:
+                shipped_label_error = f"label-transition: {label_exc}"
+                print(
+                    f"alchemist: {repo}#{issue.number}: {shipped_label_error}",
+                    file=sys.stderr,
+                )
+            return _result(
+                repo,
+                issue.number,
+                started,
+                config,
+                pr_url=pr_url,
+                merged=True,
+                error=shipped_label_error,
+            )
         return _bail(repo, issue, started, config, f"pr-create: {exc}", branch=branch)
 
     # Touchstone owns the review-and-merge gate. Alchemist hands off the PR
@@ -1940,6 +1967,27 @@ def _local_head_sha(repo_dir: Path) -> str | None:
     if re.fullmatch(r"[0-9a-f]{40}", sha):
         return sha
     return None
+
+
+def _is_no_commits_between_error(message: str) -> bool:
+    lowered = message.lower()
+    return "no commits between" in lowered and "createpullrequest" in lowered
+
+
+def _recover_pr_create_no_commits(
+    repo: str,
+    head: str,
+    error: str,
+) -> _PrHeadState | None:
+    """Reconcile gh pr create failures when the head branch already has a PR.
+
+    GitHub returns "No commits between <base> and <head>" when the branch was
+    already merged (or otherwise has no remaining delta). In retry flows this
+    commonly means alchemist already opened/merged a PR on this branch.
+    """
+    if not _is_no_commits_between_error(error):
+        return None
+    return _pr_state_for_head(repo, head)
 
 
 def _make_pr(
