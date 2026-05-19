@@ -1262,6 +1262,22 @@ def test_run_result_is_frozen():
         r.repo = "mutated"  # type: ignore[misc]
 
 
+def test_make_branch_tracks_origin_default_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from alchemist.runner import _make_branch
+
+    seen_cmds: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        seen_cmds.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _make_branch(tmp_path, "alchemist/issue-7", "main")
+
+    assert seen_cmds == [["git", "checkout", "-B", "alchemist/issue-7", "origin/main"]]
+
+
 # --------------------------------------------------------------------------- #
 # Post-timeout PR state recheck (alchemist#22)                                #
 # --------------------------------------------------------------------------- #
