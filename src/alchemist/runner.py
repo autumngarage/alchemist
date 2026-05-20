@@ -556,6 +556,7 @@ _EXTERNAL_FAILURE_PATTERNS = (
 _BENIGN_STUCK_SWEEP_RE = re.compile(
     r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
 )
+_EXPECTED_BUDGET_EXCEEDED_RE = re.compile(r"\bbudget(?:\W|_)*exceeded\b", re.IGNORECASE)
 
 
 def _branch_name(issue: DispatchIssue) -> str:
@@ -1147,6 +1148,7 @@ def _is_expected_nonfailure_error(error: str) -> bool:
     return (
         normalized == "conductor produced no diff"
         or "budget-exceeded:" in normalized
+        or _EXPECTED_BUDGET_EXCEEDED_RE.search(normalized) is not None
     )
 
 
