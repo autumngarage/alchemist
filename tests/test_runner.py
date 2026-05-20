@@ -1023,6 +1023,7 @@ def test_expected_nonfailure_error_matches_embedded_budget_exceeded():
     assert _is_expected_nonfailure_error(
         "unhandled: budget-exceeded: $2.34 spent vs $2.00 budgeted"
     )
+    assert _is_expected_nonfailure_error("budget exceeded: $4.04 spent vs $2.00 budgeted")
 
 
 def test_shipped_label_failure_is_visible_in_result(
