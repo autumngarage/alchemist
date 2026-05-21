@@ -82,7 +82,7 @@ or `/etc/alchemist/config.toml` for the Railway deploy):
 org = "autumngarage"
 poll_interval_minutes = 5
 default_budget = "$2"
-default_provider = "openrouter"
+default_provider = "auto"
 conductor_effort = "medium"       # production default; override per deployment as needed
 dispatch_label = "alchemist"       # state-label prefix: alchemist-working/error/etc.
 dry_run = true                     # flip to false after dogfood A
@@ -114,6 +114,10 @@ Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN
 `ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
 `ALCHEMIST_MAX_CONCURRENT_REPOS`, `ALCHEMIST_CONDUCTOR_EFFORT`.
 
+`default_provider = "auto"` delegates provider selection to Conductor's native
+router. Set `ALCHEMIST_PROVIDER=openrouter`, `codex`, `claude`, etc. only when
+you intentionally want to pin a provider for the worker loop.
+
 `ALCHEMIST_LABEL` is retained as the state-label prefix for compatibility. It
 does not gate intake: Alchemist scans open issues and skips issues with an
 Alchemist state label, `alchemist-skip`, or a blocked repository.
@@ -123,8 +127,9 @@ Required externally:
   `contents:rw`, or GitHub App env vars (`ALCHEMIST_APP_ID`,
   `ALCHEMIST_APP_INSTALLATION_ID`, `ALCHEMIST_APP_PRIVATE_KEY`) so Alchemist can
   mint an installation token per tick.
-- `OPENROUTER_API_KEY` — for Conductor's default `openrouter` provider when
-  running headless.
+- LLM provider credentials for Conductor. Headless Railway deployments usually
+  need `OPENROUTER_API_KEY` unless the image also installs and authenticates a
+  local CLI-backed provider that Conductor can route to.
 
 ## Going live (the dogfood gates)
 

@@ -61,11 +61,17 @@ but we don't cache across ticks). The Railway entrypoint runs
 before it shells out to `gh` or `git`. When App env vars are unset, alchemist
 falls back to Path A's PAT for backwards compatibility.
 
-### 2. Get an OpenRouter API key
+### 2. Configure Conductor provider access
 
-Conductor's agentic loop needs an LLM provider. The headless container can't use OAuth-CLI providers (claude, codex), so use OpenRouter (env-var keyed, tools-capable).
+Conductor's agentic loop needs at least one tool-capable provider. Alchemist's
+default is `ALCHEMIST_PROVIDER=auto`, which calls `conductor exec --auto` and
+lets Conductor choose from the providers available in the runtime.
 
-Create a key at https://openrouter.ai with at least $10 in credits (unlocks the 1000-req/day pay-as-you-go tier).
+The stock Railway image does not install or authenticate OAuth local-CLI
+providers such as `claude` or `codex`, so OpenRouter remains the normal
+headless fallback. Create a key at https://openrouter.ai with enough credits
+for the queue, or build a custom runtime that installs/authenticates another
+Conductor provider.
 
 ### 3. Provision the Railway service
 
@@ -282,7 +288,7 @@ All overridable per-deployment via `ALCHEMIST_*` env vars on Railway:
 | `ALCHEMIST_ORG` | `autumngarage` | The single GitHub org this deployment scopes to |
 | `ALCHEMIST_LABEL` | `alchemist` | Deprecated compatibility knob; state-label prefix, not an intake trigger |
 | `ALCHEMIST_DRY_RUN` | `true` | Skip mutations (no push, PR, label transitions) |
-| `ALCHEMIST_PROVIDER` | `openrouter` | Conductor provider for the agent loop |
+| `ALCHEMIST_PROVIDER` | `auto` | `auto` lets Conductor route natively; set a concrete provider to pin |
 | `ALCHEMIST_CONDUCTOR_EFFORT` | `medium` | Conductor effort for unattended issue work; raise deliberately for harder queues |
 | `ALCHEMIST_BUDGET` | `$2` | Per-issue cost cap (USD); `$0` or empty disables |
 | `ALCHEMIST_MAX_ISSUES_PER_TICK` | `1` | Global issues mutated per tick, including stuck sweeps |

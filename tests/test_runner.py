@@ -612,6 +612,38 @@ def test_run_conductor_uses_configured_effort(
     assert seen_cmd[effort_index + 1] == "medium"
 
 
+def test_run_conductor_auto_provider_uses_conductor_router(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _run_conductor
+
+    brief = tmp_path / "brief.md"
+    brief.write_text("brief", encoding="utf-8")
+    transcript = tmp_path / "transcript.log"
+    ndjson = tmp_path / "transcript.ndjson"
+    seen_cmd: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        _ = args, kwargs
+        seen_cmd.extend(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_conductor(
+        brief_path=brief,
+        cwd=tmp_path,
+        provider="auto",
+        timeout=60,
+        effort="medium",
+        transcript_path=transcript,
+        ndjson_path=ndjson,
+    )
+
+    assert "--auto" in seen_cmd
+    assert "--with" not in seen_cmd
+
+
 def test_run_conductor_sanitizes_transcript_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from alchemist.runner import _run_conductor, _ToolError
 
@@ -1288,6 +1320,20 @@ def test_merge_gate_uses_configured_provider(
     assert len(results) == 1
     assert results[0].merged is True
     assert captured["merge_env"]["TOUCHSTONE_CONDUCTOR_WITH"] == config.default_provider
+
+
+def test_merge_gate_auto_provider_leaves_touchstone_routing_unpinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.delenv("TOUCHSTONE_CONDUCTOR_WITH", raising=False)
+    captured = _stub_all_external(monkeypatch)
+    config = replace(_config(tmp_path, dry_run=False), default_provider="auto")
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].merged is True
+    assert "TOUCHSTONE_CONDUCTOR_WITH" not in captured["merge_env"]
 
 
 def test_merge_gate_respects_explicit_touchstone_provider(

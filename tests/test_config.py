@@ -28,6 +28,7 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.max_issues_per_tick == 1
     assert cfg.max_per_repo_per_tick == 1
     assert cfg.max_concurrent_repos == 1
+    assert cfg.default_provider == "auto"
     assert cfg.conductor_effort == "medium"
     assert cfg.repo_blocklist == ()
 
@@ -124,6 +125,15 @@ def test_conductor_effort_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("ALCHEMIST_CONDUCTOR_EFFORT", "medium")
     cfg = load_config()
     assert cfg.conductor_effort == "medium"
+
+
+def test_provider_env_var_can_pin_conductor_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setenv("ALCHEMIST_PROVIDER", "openrouter")
+    cfg = load_config()
+    assert cfg.default_provider == "openrouter"
 
 
 def test_conductor_effort_rejects_unknown_value(

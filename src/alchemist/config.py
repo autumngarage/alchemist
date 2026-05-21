@@ -84,12 +84,9 @@ class Config:
 _DEFAULTS: dict[str, object] = {
     "org": "autumngarage",
     "dispatch_label": "alchemist",
-    # `openrouter` is the headless default: env-var keyed (OPENROUTER_API_KEY)
-    # AND `tools=all` so the agentic loop can Read/Edit/Write/Bash. `claude` and
-    # `codex` use OAuth-via-local-CLI and won't work in a container; `kimi` and
-    # `deepseek-*` via OpenRouter don't expose tools. Override per-deployment via
-    # ALCHEMIST_PROVIDER.
-    "default_provider": "openrouter",
+    # Let Conductor own provider routing by default. Operators can still pin a
+    # concrete provider with ALCHEMIST_PROVIDER=openrouter/codex/claude/etc.
+    "default_provider": "auto",
     "default_budget": "$2",
     "poll_interval_minutes": 5,
     "state_dir": "/var/alchemist/state",
