@@ -2845,7 +2845,9 @@ def test_scan_prior_attempts_handles_no_comments(monkeypatch: pytest.MonkeyPatch
     assert prior.last_signature is None
 
 
-def test_scan_prior_attempts_returns_zeros_when_gh_fails(monkeypatch: pytest.MonkeyPatch):
+def test_scan_prior_attempts_returns_zeros_when_gh_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     from alchemist.runner import _scan_prior_attempts
 
     def fake_run(cmd, *args, **kwargs):
@@ -2856,6 +2858,10 @@ def test_scan_prior_attempts_returns_zeros_when_gh_fails(monkeypatch: pytest.Mon
     assert prior.count == 0
     assert prior.cumulative_cost_usd == 0.0
     assert prior.last_signature is None
+    assert (
+        "alchemist: autumngarage/touchstone#7: prior-attempt scan failed: "
+        "gh issue view exit 1: boom"
+    ) in capsys.readouterr().err
 
 
 def test_error_comment_includes_branch_and_attempt_marker(
@@ -2874,6 +2880,35 @@ def test_error_comment_includes_branch_and_attempt_marker(
     assert "<!-- alchemist-stats:" in error_body
     assert "attempt=1" in error_body
     assert "signature=" in error_body
+
+
+def test_early_error_comment_does_not_reuse_stale_ndjson(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ndjson_path_for, _ToolError
+
+    captured = _stub_all_external(monkeypatch)
+    stale_ndjson = _ndjson_path_for(tmp_path, "autumngarage/touchstone", 7)
+    stale_ndjson.parent.mkdir(parents=True)
+    stale_ndjson.write_text(
+        '{"event": "tool_call", "data": {"name": "Bash"}}\n'
+        '{"event": "usage", "data": {"cost_usd": 999.0}}\n'
+    )
+
+    def fail_prepare(_repo_dir: Path) -> None:
+        raise _ToolError(".venv/bin/python: No module named pytest")
+
+    monkeypatch.setattr("alchemist.runner._prepare_target_repo", fail_prepare)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "alchemist hit an error" in body)
+    assert not stale_ndjson.exists()
+    assert "Tool calls:" not in error_body
+    assert "Cost this run:" not in error_body
+    assert "cost_usd=999" not in error_body
 
 
 def test_error_comment_renders_attempt_count_from_prior_comments(

@@ -305,6 +305,9 @@ def _process_locked(
     if not token:
         return _result(repo, issue.number, started, config, error="missing GITHUB_TOKEN")
 
+    ndjson_path = _ndjson_path_for(config.state_dir, repo, issue.number)
+    _clear_attempt_ndjson(ndjson_path, repo, issue.number)
+
     if not config.dry_run:
         try:
             _set_label(repo, issue.number, _working_label(config.dispatch_label), config)
@@ -354,11 +357,8 @@ def _process_locked(
     brief_path.parent.mkdir(parents=True, exist_ok=True)
     brief_path.write_text(render_brief(issue, repo, work_dir))
 
-    transcript_path = (
-        config.state_dir / "transcripts" / f"{repo.replace('/', '-')}-{issue.number}.log"
-    )
+    transcript_path = ndjson_path.with_suffix(".log")
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    ndjson_path = transcript_path.with_suffix(".ndjson")
 
     try:
         _run_conductor(
@@ -1090,7 +1090,8 @@ def _scan_prior_attempts(repo: str, issue_number: int) -> _PriorAttempts:
 
     Best-effort: gh failures collapse to "no prior attempts." Operators read
     these numbers off the next error comment, so a missed scan just means
-    "(attempt 1)" instead of the true count — never wrong-direction state.
+    "(attempt 1)" instead of the true count. The fallback is logged so
+    production has an audit trail when telemetry is incomplete.
     """
     cmd = [
         "gh", "issue", "view", str(issue_number),
@@ -1102,9 +1103,25 @@ def _scan_prior_attempts(repo: str, issue_number: int) -> _PriorAttempts:
         result = subprocess.run(  # noqa: S603,S607
             cmd, capture_output=True, text=True, timeout=15, check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError as exc:
+        _log_prior_attempt_scan_failure(repo, issue_number, f"gh not found: {exc}")
+        return _PriorAttempts(count=0, cumulative_cost_usd=0.0, last_signature=None)
+    except subprocess.TimeoutExpired as exc:
+        _log_prior_attempt_scan_failure(
+            repo, issue_number, f"gh issue view timed out after {exc.timeout}s"
+        )
         return _PriorAttempts(count=0, cumulative_cost_usd=0.0, last_signature=None)
     if result.returncode != 0:
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"gh issue view exit {result.returncode}"
+        )
+        _log_prior_attempt_scan_failure(
+            repo,
+            issue_number,
+            f"gh issue view exit {result.returncode}: {_sanitize_error_text(detail)}",
+        )
         return _PriorAttempts(count=0, cumulative_cost_usd=0.0, last_signature=None)
 
     # gh's jq pipeline concatenates each comment body with its newlines
@@ -1176,6 +1193,32 @@ def _format_tool_call_summary(counts: dict[str, int]) -> str:
 
 def _ndjson_path_for(state_dir: Path, repo: str, issue_number: int) -> Path:
     return state_dir / "transcripts" / f"{repo.replace('/', '-')}-{issue_number}.ndjson"
+
+
+def _clear_attempt_ndjson(ndjson_path: Path, repo: str, issue_number: int) -> None:
+    """Remove the prior structured Conductor log before a new issue attempt.
+
+    Invariant: an error comment may only summarize an NDJSON file written by
+    the current attempt. Early failures before Conductor runs should report no
+    tool/cost telemetry instead of carrying stale numbers forward.
+    """
+    try:
+        ndjson_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(
+            f"alchemist: {repo}#{issue_number}: could not clear stale conductor log "
+            f"{ndjson_path}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _log_prior_attempt_scan_failure(repo: str, issue_number: int, detail: str) -> None:
+    print(
+        f"alchemist: {repo}#{issue_number}: prior-attempt scan failed: {detail}",
+        file=sys.stderr,
+    )
 
 
 def _failure_summary(error: str) -> str:
