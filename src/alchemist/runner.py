@@ -588,6 +588,7 @@ _BENIGN_STUCK_SWEEP_RE = re.compile(
     r"^stuck-sweep: detected stuck `-working` state \(\d+ min old\); transitioning to error$"
 )
 _EXPECTED_BUDGET_EXCEEDED_RE = re.compile(r"\bbudget(?:\W|_)*exceeded\b", re.IGNORECASE)
+_CONDUCTOR_NATIVE_PROVIDER_VALUES = {"auto", "conductor"}
 
 _ERROR_COMMENT_MARKER = "⚠️ alchemist hit an error"
 _STATS_MARKER_RE = re.compile(
@@ -1585,7 +1586,7 @@ def _run_conductor(
     """
     cmd = [
         "conductor", "exec",
-        "--with", provider,
+        *_conductor_provider_args(provider),
         "--effort", effort,
         "--tools", "Read,Edit,Write,Bash",
         "--brief-file", str(brief_path),
@@ -1909,7 +1910,11 @@ def _run_merge_pr(
         "TOUCHSTONE_NO_SCRIPT_SYNC": "1",
         "TOUCHSTONE_SCRIPT_SYNC_GUARD_DISABLE": "1",
     }
-    if provider and not env.get("TOUCHSTONE_CONDUCTOR_WITH"):
+    if (
+        provider
+        and not env.get("TOUCHSTONE_CONDUCTOR_WITH")
+        and not _uses_conductor_native_routing(provider)
+    ):
         env["TOUCHSTONE_CONDUCTOR_WITH"] = provider
     try:
         result = subprocess.run(  # noqa: S603
@@ -1939,6 +1944,16 @@ def _run_merge_pr(
         )
 
     return _MergeGateResult(merged=True)
+
+
+def _uses_conductor_native_routing(provider: str) -> bool:
+    return provider.strip().lower() in _CONDUCTOR_NATIVE_PROVIDER_VALUES
+
+
+def _conductor_provider_args(provider: str) -> list[str]:
+    if _uses_conductor_native_routing(provider):
+        return ["--auto"]
+    return ["--with", provider]
 
 
 def _classify_merge_pr_failure(output: str) -> str | None:
