@@ -1225,7 +1225,9 @@ def test_global_tick_cap_limits_total_issues(monkeypatch: pytest.MonkeyPatch, tm
     assert results[0].repo == "autumngarage/touchstone"
 
 
-def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_doctor_failure_returns_visible_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     monkeypatch.setattr("alchemist.runner.scan", lambda **_: [_issue()])
     monkeypatch.setattr(
         "alchemist.runner.run_doctor",
@@ -1236,6 +1238,42 @@ def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, t
     assert len(results) == 1
     assert results[0].issue_number == 0
     assert results[0].error == "doctor: github auth: missing"
+    captured = capsys.readouterr()
+    assert "alchemist: doctor failed; skipping tick — github auth: missing" in captured.err
+    assert re.search(
+        r"alchemist tick: 1 processed "
+        r"\(shipped=0 blocked=0 errored=0 declined=0 fatal=1\) in \d+\.\d+s",
+        captured.err,
+    )
+
+
+def test_scan_failure_returns_visible_error_and_tick_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(
+        "alchemist.runner.run_doctor",
+        lambda config: [Check(name=n, ok=True, detail="fake") for n in ("gh", "git")],
+    )
+    monkeypatch.setattr("alchemist.runner._sweep_stuck", lambda config: [])
+
+    def fail_scan(**_: object):
+        raise RuntimeError("search unavailable")
+
+    monkeypatch.setattr("alchemist.runner.scan", fail_scan)
+    config = _config(tmp_path)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].issue_number == 0
+    assert results[0].error == "scan: search unavailable"
+    captured = capsys.readouterr()
+    assert "alchemist: scan failed: search unavailable" in captured.err
+    assert re.search(
+        r"alchemist tick: 1 processed "
+        r"\(shipped=0 blocked=0 errored=0 declined=0 fatal=1\) in \d+\.\d+s",
+        captured.err,
+    )
 
 
 def test_merge_gate_uses_configured_provider(
@@ -1634,7 +1672,7 @@ def test_pr_create_failure_reports_working_branch_visibility(
     assert results[0].branch is not None
     bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
     error_body = next(body for body in bodies if "pr-create:" in body)
-    assert f"Working branch: {results[0].branch}" in error_body
+    assert f"Working branch: `{results[0].branch}`" in error_body
 
 
 # --------------------------------------------------------------------------- #
@@ -2768,3 +2806,239 @@ def test_check_budget_fails_open_when_cost_unknown(tmp_path: Path):
     log = tmp_path / "empty.ndjson"
     log.write_text('{"event": "route_decision"}\n')
     assert _check_budget(log, "$2") is None
+
+
+# --------------------------------------------------------------------------- #
+# Error-comment telemetry: attempt count, tool calls, cumulative cost         #
+# --------------------------------------------------------------------------- #
+
+
+def test_summarize_tool_calls_counts_by_name(tmp_path: Path):
+    from alchemist.runner import _format_tool_call_summary, _summarize_tool_calls
+
+    log = tmp_path / "session.ndjson"
+    log.write_text(
+        '{"event": "tool_call", "data": {"name": "Read"}}\n'
+        '{"event": "tool_call", "data": {"name": "Bash"}}\n'
+        '{"event": "tool_call", "data": {"name": "Bash"}}\n'
+        '{"event": "usage", "data": {"cost_usd": 0.10}}\n'
+        '{"event": "tool_call", "data": {"name": "WebFetch"}}\n'
+    )
+    counts = _summarize_tool_calls(log)
+    assert counts == {"Read": 1, "Bash": 2, "WebFetch": 1}
+    assert _format_tool_call_summary(counts) == "Read=1 Edit=0 Write=0 Bash=2 WebFetch=1"
+
+
+def test_summarize_tool_calls_missing_file_returns_empty(tmp_path: Path):
+    from alchemist.runner import _summarize_tool_calls
+    assert _summarize_tool_calls(tmp_path / "absent.ndjson") == {}
+
+
+def test_summarize_tool_calls_logs_unreadable_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    from alchemist.runner import _summarize_tool_calls
+
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "tool_call", "data": {"name": "Bash"}}\n')
+    real_read_text = Path.read_text
+
+    def fail_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == log:
+            raise OSError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+    assert _summarize_tool_calls(log) == {}
+    assert f"alchemist: tool-call log unreadable {log}: permission denied" in (
+        capsys.readouterr().err
+    )
+
+
+def test_scan_prior_attempts_counts_error_markers_and_sums_cost(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from alchemist.runner import _scan_prior_attempts
+
+    marker_one = (
+        "<!-- alchemist-stats: attempt=1 signature=abc123abc123 "
+        "cost_usd=0.7500 cumulative_cost_usd=0.7500 -->"
+    )
+    marker_two = (
+        "<!-- alchemist-stats: attempt=2 signature=abc123abc123 "
+        "cost_usd=0.9000 cumulative_cost_usd=1.6500 -->"
+    )
+    bodies = (
+        "🧪 alchemist picked this up.\n\n"
+        "- Worker: autumn-alchemist[bot]\n\n\n"
+        "⚠️ alchemist hit an error: conductor: exit 1\n\n"
+        "Working branch: `alchemist/issue-7-foo`\n\n"
+        f"{marker_one}\n\n"
+        "🧪 alchemist picked this up.\n\n\n"
+        "⚠️ alchemist hit an error (attempt 2): conductor: exit 1\n\n"
+        "Working branch: `alchemist/issue-7-foo`\n\n"
+        f"{marker_two}"
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        assert cmd[:2] == ["gh", "issue"]
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=bodies, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    prior = _scan_prior_attempts("autumngarage/touchstone", 7)
+    assert prior.count == 2
+    assert prior.cumulative_cost_usd == pytest.approx(1.65)
+    assert prior.last_signature == "abc123abc123"
+
+
+def test_scan_prior_attempts_handles_no_comments(monkeypatch: pytest.MonkeyPatch):
+    from alchemist.runner import _scan_prior_attempts
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    prior = _scan_prior_attempts("autumngarage/touchstone", 7)
+    assert prior.count == 0
+    assert prior.cumulative_cost_usd == 0.0
+    assert prior.last_signature is None
+
+
+def test_scan_prior_attempts_returns_zeros_when_gh_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    from alchemist.runner import _scan_prior_attempts
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    prior = _scan_prior_attempts("autumngarage/touchstone", 7)
+    assert prior.count == 0
+    assert prior.cumulative_cost_usd == 0.0
+    assert prior.last_signature is None
+    assert (
+        "alchemist: autumngarage/touchstone#7: prior-attempt scan failed: "
+        "gh issue view exit 1: boom"
+    ) in capsys.readouterr().err
+
+
+def test_error_comment_includes_branch_and_attempt_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Even on the first attempt the error comment carries the branch and a
+    machine-readable stats marker so the next tick can compute cumulative cost."""
+    captured = _stub_all_external(monkeypatch, conductor_outcome="error")
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "alchemist hit an error" in body)
+    assert "Working branch: `alchemist/issue-7-fix-typo-in-readme-7`" in error_body
+    assert "<!-- alchemist-stats:" in error_body
+    assert "attempt=1" in error_body
+    assert "signature=" in error_body
+
+
+def test_early_error_comment_does_not_reuse_stale_ndjson(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ndjson_path_for, _ToolError
+
+    captured = _stub_all_external(monkeypatch)
+    stale_ndjson = _ndjson_path_for(tmp_path, "autumngarage/touchstone", 7)
+    stale_ndjson.parent.mkdir(parents=True)
+    stale_ndjson.write_text(
+        '{"event": "tool_call", "data": {"name": "Bash"}}\n'
+        '{"event": "usage", "data": {"cost_usd": 999.0}}\n'
+    )
+
+    def fail_prepare(_repo_dir: Path) -> None:
+        raise _ToolError(".venv/bin/python: No module named pytest")
+
+    monkeypatch.setattr("alchemist.runner._prepare_target_repo", fail_prepare)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "alchemist hit an error" in body)
+    assert not stale_ndjson.exists()
+    assert "Tool calls:" not in error_body
+    assert "Cost this run:" not in error_body
+    assert "cost_usd=999" not in error_body
+
+
+def test_error_comment_renders_attempt_count_from_prior_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """When prior error comments are present on the issue, the new comment
+    shows the next attempt number and flags repeated signatures."""
+    from alchemist.runner import (
+        _failure_signature,
+        _sanitize_error_text,
+        _ToolError,
+    )
+
+    # The bail message gets sanitized before signing — match that so we know
+    # the signature alchemist computes is the one we embedded in prior_body.
+    conductor_tail = "transcript tail:\nboom\nsee /var/alchemist/state/transcripts/x.log"
+    bail_message = f"conductor: exit 2; {conductor_tail}"
+    prior_signature = _failure_signature(_sanitize_error_text(bail_message))
+    prior_marker = (
+        f"<!-- alchemist-stats: attempt=1 signature={prior_signature} "
+        "cost_usd=0.5000 cumulative_cost_usd=0.5000 -->"
+    )
+    prior_body = (
+        "⚠️ alchemist hit an error: conductor: exit 2\n\n"
+        "Working branch: `alchemist/issue-7-fix-typo-in-readme-7`\n\n"
+        f"{prior_marker}"
+    )
+
+    captured = _stub_all_external(monkeypatch)
+
+    def _conductor_returns_error(**_: object) -> None:
+        raise _ToolError(f"exit 2; {conductor_tail}")
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", _conductor_returns_error)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if (
+            cmd[:3] == ["gh", "issue", "view"]
+            and "--json" in cmd
+            and "comments" in cmd
+        ):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=prior_body, stderr=""
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    error_body = next(body for body in bodies if "alchemist hit an error" in body)
+    assert "(attempt 2)" in error_body
+    assert f"Same failure signature as the previous attempt (`{prior_signature}`)" in error_body
+
+
+def test_tick_summary_logged_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    _stub_all_external(monkeypatch)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    captured = capsys.readouterr()
+    assert re.search(
+        r"alchemist tick: 1 processed "
+        r"\(shipped=1 blocked=0 errored=0 declined=0 fatal=0\) in \d+\.\d+s",
+        captured.err,
+    )
