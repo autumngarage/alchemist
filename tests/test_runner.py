@@ -1225,7 +1225,9 @@ def test_global_tick_cap_limits_total_issues(monkeypatch: pytest.MonkeyPatch, tm
     assert results[0].repo == "autumngarage/touchstone"
 
 
-def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_doctor_failure_returns_visible_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     monkeypatch.setattr("alchemist.runner.scan", lambda **_: [_issue()])
     monkeypatch.setattr(
         "alchemist.runner.run_doctor",
@@ -1236,6 +1238,42 @@ def test_doctor_failure_returns_visible_error(monkeypatch: pytest.MonkeyPatch, t
     assert len(results) == 1
     assert results[0].issue_number == 0
     assert results[0].error == "doctor: github auth: missing"
+    captured = capsys.readouterr()
+    assert "alchemist: doctor failed; skipping tick — github auth: missing" in captured.err
+    assert re.search(
+        r"alchemist tick: 1 processed "
+        r"\(shipped=0 blocked=0 errored=0 declined=0 fatal=1\) in \d+\.\d+s",
+        captured.err,
+    )
+
+
+def test_scan_failure_returns_visible_error_and_tick_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(
+        "alchemist.runner.run_doctor",
+        lambda config: [Check(name=n, ok=True, detail="fake") for n in ("gh", "git")],
+    )
+    monkeypatch.setattr("alchemist.runner._sweep_stuck", lambda config: [])
+
+    def fail_scan(**_: object):
+        raise RuntimeError("search unavailable")
+
+    monkeypatch.setattr("alchemist.runner.scan", fail_scan)
+    config = _config(tmp_path)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].issue_number == 0
+    assert results[0].error == "scan: search unavailable"
+    captured = capsys.readouterr()
+    assert "alchemist: scan failed: search unavailable" in captured.err
+    assert re.search(
+        r"alchemist tick: 1 processed "
+        r"\(shipped=0 blocked=0 errored=0 declined=0 fatal=1\) in \d+\.\d+s",
+        captured.err,
+    )
 
 
 def test_merge_gate_uses_configured_provider(
@@ -2794,6 +2832,28 @@ def test_summarize_tool_calls_counts_by_name(tmp_path: Path):
 def test_summarize_tool_calls_missing_file_returns_empty(tmp_path: Path):
     from alchemist.runner import _summarize_tool_calls
     assert _summarize_tool_calls(tmp_path / "absent.ndjson") == {}
+
+
+def test_summarize_tool_calls_logs_unreadable_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    from alchemist.runner import _summarize_tool_calls
+
+    log = tmp_path / "session.ndjson"
+    log.write_text('{"event": "tool_call", "data": {"name": "Bash"}}\n')
+    real_read_text = Path.read_text
+
+    def fail_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == log:
+            raise OSError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+    assert _summarize_tool_calls(log) == {}
+    assert f"alchemist: tool-call log unreadable {log}: permission denied" in (
+        capsys.readouterr().err
+    )
 
 
 def test_scan_prior_attempts_counts_error_markers_and_sums_cost(

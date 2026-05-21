@@ -108,7 +108,9 @@ def run_tick(config: Config) -> list[RunResult]:
             f"alchemist: doctor failed; skipping tick — {details}",
             file=sys.stderr,
         )
-        return [_run_level_error(config, f"doctor: {details}")]
+        results = [_run_level_error(config, f"doctor: {details}")]
+        _log_tick_summary(results, time.monotonic() - tick_started)
+        return results
 
     sweep_results = _sweep_stuck(config)
     remaining_issue_budget = max(0, config.max_issues_per_tick - len(sweep_results))
@@ -117,7 +119,9 @@ def run_tick(config: Config) -> list[RunResult]:
         issues = scan(org=config.org)
     except Exception as exc:  # noqa: BLE001 — surface any scanner failure to operator
         print(f"alchemist: scan failed: {exc}", file=sys.stderr)
-        return [*sweep_results, _run_level_error(config, f"scan: {exc}")]
+        results = [*sweep_results, _run_level_error(config, f"scan: {exc}")]
+        _log_tick_summary(results, time.monotonic() - tick_started)
+        return results
 
     ignored_labels = {
         _working_label(config.dispatch_label)[1].lower(),
@@ -1158,7 +1162,8 @@ def _summarize_tool_calls(ndjson_path: Path) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     try:
         text = ndjson_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as exc:
+        print(f"alchemist: tool-call log unreadable {ndjson_path}: {exc}", file=sys.stderr)
         return {}
     for line in text.splitlines():
         line = line.strip()
