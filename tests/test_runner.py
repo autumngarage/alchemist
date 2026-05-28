@@ -610,6 +610,8 @@ def test_run_conductor_uses_configured_effort(
 
     effort_index = seen_cmd.index("--effort")
     assert seen_cmd[effort_index + 1] == "medium"
+    max_iterations_index = seen_cmd.index("--max-iterations")
+    assert seen_cmd[max_iterations_index + 1] == "30"
 
 
 def test_run_conductor_auto_provider_uses_conductor_router(
