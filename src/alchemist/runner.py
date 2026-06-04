@@ -568,6 +568,10 @@ _CONDUCTOR_TIMEOUT_MAX_SEC = 60 * 60
 # exit cleanly instead of being killed at +30s (observed in alchemist#132).
 _CONDUCTOR_SUBPROCESS_GRACE_MIN_SEC = 30
 _CONDUCTOR_SUBPROCESS_GRACE_MAX_SEC = 120
+# Keep conductor's loop cap comfortably above the default so longer briefs can
+# complete under the existing timeout/budget guards instead of failing early at
+# the router default (60 iterations).
+_CONDUCTOR_MAX_ITERATIONS = 120
 _META_REPO = "autumngarage/alchemist"
 _META_TITLE_PREFIX = "[alchemist-meta] failure: "
 _META_SIGNATURE_LEN = 12
