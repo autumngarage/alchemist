@@ -26,7 +26,7 @@ Drive this automatically unless the user asks for a different flow:
 
 File-writing subagents use isolated worktrees by default. Follow `principles/agent-swarms.md` for slice manifests, file ownership, concurrency caps, and parent orchestration. Use `scripts/spawn-worktree.sh` to create local branch/worktree slices and `scripts/cleanup-worktrees.sh` for dry-run-first teardown.
 
-<!-- conductor:begin v0.10.32 -->
+<!-- conductor:begin v0.10.33 -->
 ## Conductor delegation
 
 This project has [conductor](https://github.com/autumngarage/conductor)
