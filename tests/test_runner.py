@@ -1242,6 +1242,56 @@ def test_grouping_takes_one_per_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert len(results) == 2
 
 
+def test_select_work_triage_after_defers_issue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from alchemist.runner import _select_work
+
+    older = _issue(num=1, repo="autumngarage/touchstone")
+    newer = _issue(num=2, repo="autumngarage/touchstone")
+    config = replace(_config(tmp_path, dry_run=True), max_per_repo_per_tick=2)
+
+    monkeypatch.setattr("alchemist.runner._is_issue_reference_open", lambda ref, repo: True)
+    triage = {"autumngarage/touchstone#1": {"after": "#204"}}
+
+    selected = _select_work([older, newer], config, limit=2, triage=triage)
+
+    assert selected == [("autumngarage/touchstone", [newer])]
+
+
+def test_select_work_triage_priority_promotes_newer_issue(tmp_path: Path):
+    from alchemist.runner import _select_work
+
+    older = _issue(num=1, repo="autumngarage/touchstone")
+    newer = _issue(num=2, repo="autumngarage/touchstone")
+    config = replace(_config(tmp_path, dry_run=True), max_per_repo_per_tick=2)
+    triage = {"autumngarage/touchstone#2": {"priority": "high"}}
+
+    selected = _select_work([older, newer], config, limit=2, triage=triage)
+
+    assert selected == [("autumngarage/touchstone", [newer, older])]
+
+
+def test_triage_failure_falls_through_to_oldest_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _select_work, _triage_queue
+
+    older = _issue(num=1, repo="autumngarage/touchstone")
+    newer = _issue(num=2, repo="autumngarage/touchstone")
+    config = replace(_config(tmp_path, dry_run=True), max_per_repo_per_tick=2)
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["conductor", "ask"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    triage = _triage_queue([older, newer], [], config)
+
+    assert triage == {}
+    selected = _select_work([older, newer], config, limit=2, triage=triage)
+    assert selected == [("autumngarage/touchstone", [older, newer])]
+
+
 def test_global_tick_cap_limits_total_issues(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     issues = [
         _issue(num=1, repo="autumngarage/touchstone"),
