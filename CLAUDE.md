@@ -102,6 +102,6 @@ env var is deprecated; alchemist no longer gates on a dispatch label.
   posture from alchemist's reactive single-shot).
 - `autumngarage/autumn-garage` — meta repo holding the shared workflow + plans.
 
-<!-- conductor:begin v0.10.32 -->
+<!-- conductor:begin v0.10.33 -->
 @~/.conductor/delegation-guidance.md
 <!-- conductor:end -->
