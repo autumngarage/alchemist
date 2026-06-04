@@ -101,3 +101,7 @@ env var is deprecated; alchemist no longer gates on a dispatch label.
 - `autumngarage/sentinel` — sister tool (proactive backlog worker; opposite
   posture from alchemist's reactive single-shot).
 - `autumngarage/autumn-garage` — meta repo holding the shared workflow + plans.
+
+<!-- conductor:begin v0.10.32 -->
+@~/.conductor/delegation-guidance.md
+<!-- conductor:end -->
