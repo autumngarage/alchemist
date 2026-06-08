@@ -52,6 +52,7 @@ class Config:
     app_installation_id: str | None
     app_private_key: str | None
     app_private_key_path: Path | None
+    allow_bash_tool: bool = False
 
     @property
     def github_token(self) -> str | None:
@@ -122,6 +123,7 @@ _DEFAULTS: dict[str, object] = {
     "app_installation_id": "",
     "app_private_key": "",
     "app_private_key_path": "",
+    "allow_bash_tool": False,
 }
 
 
@@ -227,6 +229,7 @@ def load_config() -> Config:
         "ALCHEMIST_APP_INSTALLATION_ID": "app_installation_id",
         "ALCHEMIST_APP_PRIVATE_KEY": "app_private_key",
         "ALCHEMIST_APP_PRIVATE_KEY_PATH": "app_private_key_path",
+        "ALCHEMIST_ALLOW_BASH_TOOL": "allow_bash_tool",
     }
     for env_name, key in env_overrides.items():
         if env_name in os.environ:
@@ -259,4 +262,5 @@ def load_config() -> Config:
             if str(merged["app_private_key_path"]).strip()
             else None
         ),
+        allow_bash_tool=_coerce_bool(merged["allow_bash_tool"]),
     )

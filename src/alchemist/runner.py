@@ -597,6 +597,41 @@ _BENIGN_STUCK_SWEEP_RE = re.compile(
 )
 _EXPECTED_BUDGET_EXCEEDED_RE = re.compile(r"\bbudget(?:\W|_)*exceeded\b", re.IGNORECASE)
 _CONDUCTOR_NATIVE_PROVIDER_VALUES = {"auto", "conductor"}
+_PROVIDER_ENV_PREFIXES = (
+    "OPENROUTER_",
+    "OPENAI_",
+    "ANTHROPIC_",
+    "GEMINI_",
+    "GOOGLE_",
+    "XAI_",
+    "MISTRAL_",
+    "GROQ_",
+    "COHERE_",
+    "TOGETHER_",
+    "FIREWORKS_",
+    "PERPLEXITY_",
+    "DEEPSEEK_",
+    "AZURE_OPENAI_",
+    "CONDUCTOR_",
+)
+_WORKER_ENV_ALLOWLIST = {
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+}
 
 _ERROR_COMMENT_MARKER = "⚠️ alchemist hit an error"
 _STATS_MARKER_RE = re.compile(
