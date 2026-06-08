@@ -962,6 +962,49 @@ def test_openrouter_credit_exhaustion_is_external_failure():
     assert _is_external_failure(message)
 
 
+def test_bad_credentials_auth_failure_is_external_failure():
+    from alchemist.runner import _is_external_failure
+
+    message = (
+        "label-ensure: could not ensure label 'alchemist-blocked' on "
+        "autumngarage/alchemist: HTTP 401: Bad credentials "
+        "(https://api.github.com/repos/autumngarage/alchemist/labels)\n"
+        "Try authenticating with: gh auth login"
+    )
+
+    assert _is_external_failure(message)
+
+
+def test_label_ensure_bad_credentials_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _GhError
+
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_label_ensure(repo: str, dispatch_label: str) -> None:
+        _ = repo, dispatch_label
+        raise _GhError(
+            "could not ensure label 'alchemist-test-blocked' on "
+            "autumngarage/touchstone: HTTP 401: Bad credentials "
+            "(https://api.github.com/repos/autumngarage/touchstone/labels)\n"
+            "Try authenticating with: gh auth login"
+        )
+
+    monkeypatch.setattr("alchemist.runner._ensure_labels", fail_label_ensure)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    assert results[0].error is not None
+    assert results[0].error.startswith("label-ensure:")
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_openrouter_credit_exhaustion_does_not_self_file_meta_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
