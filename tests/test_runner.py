@@ -2194,17 +2194,21 @@ def test_token_never_appears_in_git_urls(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_git_auth_prefix_uses_basic_header_with_x_access_token():
-    """The auth prefix uses HTTP Basic with `x-access-token:<token>` so it
-    works for both PATs and App installation tokens (GitHub's git endpoint
-    rejects Bearer for installation tokens)."""
+    """The auth prefix clears inherited extraheaders and then injects a
+    GitHub-scoped Basic header with `x-access-token:<token>` credentials."""
     import base64
 
     from alchemist.runner import _git_auth_prefix
 
     prefix = _git_auth_prefix("ghs_install123")
-    assert prefix[:2] == ["git", "-c"]
     expected_encoded = base64.b64encode(b"x-access-token:ghs_install123").decode()
-    assert prefix[2] == f"http.extraheader=Authorization: Basic {expected_encoded}"
+    assert prefix == [
+        "git",
+        "-c",
+        "http.extraheader=",
+        "-c",
+        f"http.https://github.com/.extraheader=Authorization: Basic {expected_encoded}",
+    ]
 
 
 def test_git_auth_failures_are_sanitized_before_comments(
