@@ -1335,6 +1335,10 @@ def _is_expected_nonfailure_error(error: str) -> bool:
         normalized == "conductor produced no diff"
         or "budget-exceeded:" in normalized
         or _EXPECTED_BUDGET_EXCEEDED_RE.search(normalized) is not None
+        or (
+            "requires workflow-file edits" in normalized
+            and "without `workflows` permission" in normalized
+        )
     )
 
 

@@ -77,6 +77,7 @@ def _stub_all_external(
     git_auth_failure: bool = False,
     remote_branch_exists: bool = True,
     push_create_failure: bool = False,
+    push_workflow_permission_failure: bool = False,
     pr_create_failure: bool = False,
     label_transition_fail_on: str | None = None,
     # "merged" | "blocked" | "dirty-conflict" | "preflight-failed" |
@@ -267,6 +268,17 @@ def _stub_all_external(
                     stderr=(
                         "fatal: Authentication failed with "
                         "Authorization: Basic Z2hwX1NFQ1JFVA== ghp_SECRETLEAK"
+                    ),
+                )
+            if "--set-upstream" in cmd and push_workflow_permission_failure:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr=(
+                        "remote: error: GH006: Protected branch update failed for refs/heads/main.\n"
+                        "remote: refusing to allow a GitHub App to create or update workflow "
+                        "`.github/workflows/validate.yml` without `workflows` permission\n"
                     ),
                 )
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
@@ -1019,6 +1031,37 @@ def test_no_diff_decline_does_not_self_file_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_workflow_permission_push_failure_results_in_decline_and_no_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("ALCHEMIST_DISABLE_SELF_FILE", "0")
+    captured = _stub_all_external(monkeypatch, push_workflow_permission_failure=True)
+    config = _config(tmp_path, dry_run=False)
+
+    results = run_tick(config)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.error is not None
+    assert "requires workflow-file edits" in r.error
+    assert "without `workflows` permission" in r.error
+    assert r.pr_url is None
+    assert r.merged is None
+    assert captured["pr_creates"] == []
+    add_labels = [
+        cmd[cmd.index("--add-label") + 1]
+        for cmd in captured["label_transitions"]
+        if "--add-label" in cmd
+    ]
+    assert "alchemist-test-declined" in add_labels
+    assert "alchemist-test-error" not in add_labels
+    bodies = [cmd[cmd.index("--body") + 1] for cmd in captured["activity_comments"]]
+    assert any("requires workflow-file edits" in body for body in bodies)
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_budget_exceeded_transitions_to_blocked_and_does_not_self_file_meta_issue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -1056,6 +1099,10 @@ def test_expected_nonfailure_error_matches_embedded_budget_exceeded():
         "unhandled: budget-exceeded: $2.34 spent vs $2.00 budgeted"
     )
     assert _is_expected_nonfailure_error("budget exceeded: $4.04 spent vs $2.00 budgeted")
+    assert _is_expected_nonfailure_error(
+        "requires workflow-file edits, but this deployment's GitHub App token "
+        "cannot push `.github/workflows/*` without `workflows` permission"
+    )
 
 
 def test_shipped_label_failure_is_visible_in_result(
