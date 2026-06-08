@@ -1874,6 +1874,35 @@ def test_push_timeout_retry_failure_reraises_original_timeout(monkeypatch: pytes
     assert exc_info.value is first_error
 
 
+def test_clone_or_update_uses_longer_fetch_timeout_for_existing_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _clone_or_update
+
+    dest = tmp_path / "repo"
+    (dest / ".git").mkdir(parents=True)
+    seen: dict[str, int] = {}
+
+    def fake_run_git_auth(cmd, *, cwd=None, token, timeout):
+        _ = cmd, cwd, token
+        seen["timeout"] = timeout
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("alchemist.runner._git_auth_prefix", lambda token: ["git"])
+    monkeypatch.setattr("alchemist.runner._run_git_auth", fake_run_git_auth)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, *args, **kwargs: subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    _clone_or_update("autumngarage/touchstone", dest, "main", "ghp_fake")
+
+    assert seen["timeout"] == 300
+
+
 def test_pr_create_failure_reports_working_branch_visibility(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
