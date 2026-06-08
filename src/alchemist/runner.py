@@ -583,6 +583,8 @@ _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"openrouter response was not json", re.IGNORECASE),
     re.compile(r"upstream\s+http\s*402", re.IGNORECASE),
     re.compile(r"requires more credits,?\s+or\s+fewer\s+max_tokens", re.IGNORECASE),
+    re.compile(r"\bcan only afford\b", re.IGNORECASE),
+    re.compile(r"openrouter\.ai/settings/credits", re.IGNORECASE),
     re.compile(r"\bmerge-pr:\s*preflight failed\b", re.IGNORECASE),
     re.compile(r"reached --max-iterations cap", re.IGNORECASE),
     re.compile(r"iteration cap hit at", re.IGNORECASE),
