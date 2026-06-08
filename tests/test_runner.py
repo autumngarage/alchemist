@@ -950,6 +950,45 @@ def test_non_external_failure_self_files_meta_issue(
     assert captured["meta_issue_comments"] == []
 
 
+def test_openrouter_credit_exhaustion_is_external_failure():
+    from alchemist.runner import _is_external_failure
+
+    message = (
+        "conductor: OpenRouter provider failed locally after upstream HTTP 402. "
+        "upstream response: {\"error\":{\"message\":\"This request requires "
+        "more credits, or fewer max_tokens. You requested up to 65536 tokens\"}}"
+    )
+
+    assert _is_external_failure(message)
+
+
+def test_openrouter_credit_exhaustion_does_not_self_file_meta_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from alchemist.runner import _ToolError
+
+    monkeypatch.delenv("ALCHEMIST_DISABLE_SELF_FILE", raising=False)
+    captured = _stub_all_external(monkeypatch)
+
+    def fail_conductor(**_: object) -> None:
+        raise _ToolError(
+            "exit 1; transcript tail:\n"
+            "[conductor] agent loop iteration cap: 20\n"
+            "conductor: OpenRouter provider failed locally after upstream HTTP 402. "
+            "upstream response: {\"error\":{\"message\":\"This request requires "
+            "more credits, or fewer max_tokens. You requested up to 65536 tokens\"}}\n"
+        )
+
+    monkeypatch.setattr("alchemist.runner._run_conductor", fail_conductor)
+    config = _config(tmp_path, dry_run=False)
+
+    run_tick(config)
+
+    assert captured["meta_issue_lists"] == []
+    assert captured["meta_issue_creates"] == []
+    assert captured["meta_issue_comments"] == []
+
+
 def test_merge_infra_failure_is_fatal_with_pr_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
