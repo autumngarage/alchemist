@@ -60,6 +60,8 @@ _PR_TITLE_PREFIX = "[alchemist]"
 _MIN_STUCK_SWEEP_THRESHOLD_SEC = 30 * 60
 _STUCK_SWEEP_MARGIN_SEC = 10 * 60
 _TARGET_DEP_PREP_TIMEOUT_SEC = 10 * 60
+_GIT_FETCH_TIMEOUT_SEC = 300
+_GIT_CLONE_TIMEOUT_SEC = 300
 _SKIP_LABEL = "alchemist-skip"
 
 # Per-process cache: only ensure a repo+dispatch label set once per process.
@@ -1453,7 +1455,7 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
         )
         _run_git_auth(
             [*git_auth, "fetch", "origin", default_branch, "--depth", "50"],
-            cwd=dest, token=token, timeout=120,
+            cwd=dest, token=token, timeout=_GIT_FETCH_TIMEOUT_SEC,
         )
         subprocess.run(  # noqa: S603,S607
             ["git", "reset", "--hard", f"origin/{default_branch}"],
@@ -1470,7 +1472,7 @@ def _clone_or_update(repo: str, dest: Path, default_branch: str, token: str) -> 
     dest.parent.mkdir(parents=True, exist_ok=True)
     _run_git_auth(
         [*git_auth, "clone", "--depth", "50", "--branch", default_branch, url, str(dest)],
-        token=token, timeout=300,
+        token=token, timeout=_GIT_CLONE_TIMEOUT_SEC,
     )
 
 
