@@ -573,7 +573,9 @@ _META_TITLE_PREFIX = "[alchemist-meta] failure: "
 _META_SIGNATURE_LEN = 12
 _EXTERNAL_FAILURE_PATTERNS = (
     re.compile(r"\brate.?limit\b", re.IGNORECASE),
-    re.compile(r"\b(?:429|502|503|504)\b", re.IGNORECASE),
+    re.compile(r"\b(?:401|429|502|503|504)\b", re.IGNORECASE),
+    re.compile(r"\bbad credentials\b", re.IGNORECASE),
+    re.compile(r"\bgh auth login\b", re.IGNORECASE),
     re.compile(r"\bbad gateway\b", re.IGNORECASE),
     re.compile(r"\beconnrefused\b", re.IGNORECASE),
     re.compile(r"\bnetwork\b", re.IGNORECASE),
