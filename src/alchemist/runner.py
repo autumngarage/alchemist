@@ -1001,8 +1001,8 @@ def _default_branch(repo: str) -> str:
 
 
 def _git_auth_prefix(token: str) -> list[str]:
-    """Return a `git -c http.extraheader=...` prefix that authenticates without
-    embedding the token in URLs.
+    """Return a `git -c ...` prefix that authenticates without embedding
+    the token in URLs.
 
     URL-embedded auth (`https://x-access-token:<token>@github.com/...`) leaks
     the token into:
@@ -1010,17 +1010,25 @@ def _git_auth_prefix(token: str) -> list[str]:
         (which Railway captures into deployment logs)
       - the cloned repo's `.git/config` (where set-url persists it)
       - any error message that includes the URL
-    With `http.extraheader`, the auth ride-alongs only the in-process git
-    invocation. The token never appears in stored config or printed URLs.
 
-    Uses HTTP Basic auth with `x-access-token:<token>` as the credential
-    pair. GitHub's git-over-HTTPS endpoint accepts Basic for both
-    classic/fine-grained PATs and App installation tokens; Bearer is
-    accepted for the API but not for git operations on installation
-    tokens. Basic works for everything.
+    We authenticate via an in-process extra HTTP header instead. Prefixing with
+    `-c http.extraheader=` clears any inherited global/local headers first
+    (notably stale headers left by other tooling), then sets a GitHub-scoped
+    Authorization header. This avoids duplicate/invalid auth headers causing
+    clone/fetch failures.
+
+    Uses HTTP Basic auth with `x-access-token:<token>` as the credential pair.
+    GitHub's git-over-HTTPS endpoint accepts Basic for both PATs and App
+    installation tokens.
     """
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return ["git", "-c", f"http.extraheader=Authorization: Basic {encoded}"]
+    return [
+        "git",
+        "-c",
+        "http.extraheader=",
+        "-c",
+        f"http.https://github.com/.extraheader=Authorization: Basic {encoded}",
+    ]
 
 
 def _sanitize_error_text(text: str, *, token: str | None = None) -> str:
