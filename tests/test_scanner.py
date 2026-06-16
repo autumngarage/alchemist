@@ -21,8 +21,8 @@ def test_parse_handles_missing_optional_fields():
             "number": 7,
             "title": "Fix typo in README",
             "body": "There's a typo on line 12.",
-            "url": "https://github.com/autumngarage/touchstone/issues/7",
-            "repository": {"nameWithOwner": "autumngarage/touchstone"},
+            "url": "https://github.com/autumngarage/widgets/issues/7",
+            "repository": {"nameWithOwner": "autumngarage/widgets"},
             "updatedAt": "2026-05-06T18:00:00Z",
             "labels": [{"name": "alchemist-test"}, {"name": "good first issue"}],
         }
@@ -32,7 +32,7 @@ def test_parse_handles_missing_optional_fields():
     issue = parsed[0]
     assert isinstance(issue, DispatchIssue)
     assert issue.number == 7
-    assert issue.repository == "autumngarage/touchstone"
+    assert issue.repository == "autumngarage/widgets"
     assert "alchemist-test" in issue.labels
 
 

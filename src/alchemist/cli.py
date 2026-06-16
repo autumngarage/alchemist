@@ -26,11 +26,10 @@ def _resolve_github_token(config: Config) -> str | None:
     """Mint a GitHub App installation token (or pass through the PAT) and
     populate `$GITHUB_TOKEN` in this process's environment.
 
-    Every alchemist command that ends up shelling out to `gh` or `git push`
-    needs `GITHUB_TOKEN` set on the spawned subprocess. With App auth, the
-    token is minted fresh per command rather than sourced from a static
-    env var. Setting `os.environ` here lets the rest of the runner stay
-    auth-mechanism-agnostic — it just reads the env var like always.
+    Every alchemist command that shells out to `gh` needs `GITHUB_TOKEN` set on
+    the spawned subprocess. With App auth, the token is minted fresh per command
+    rather than sourced from a static env var. Setting `os.environ` here lets the
+    rest of the runner stay auth-mechanism-agnostic.
 
     Returns the token string (for callers that want to print it, like
     `alchemist auth-token`) or None when no auth is configured at all.
@@ -84,26 +83,28 @@ def doctor(as_json: bool) -> None:
             "version": __version__,
             "config": {
                 "org": config.org,
-                "dispatch_label": config.dispatch_label,
-                "default_provider": config.default_provider,
-                "conductor_effort": config.conductor_effort,
+                "intake_label": config.intake_label,
+                "state_label_prefix": config.state_label_prefix,
+                "agent_provider": config.agent_provider,
+                "agent_stale_after_hours": config.agent_stale_after_hours,
+                "auto_merge": config.auto_merge,
                 "dry_run": config.dry_run,
                 "max_issues_per_tick": config.max_issues_per_tick,
                 "max_per_repo_per_tick": config.max_per_repo_per_tick,
                 "max_concurrent_repos": config.max_concurrent_repos,
                 "state_dir": str(config.state_dir),
             },
-            "checks": [
-                {"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks
-            ],
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
             "ok": all(c.ok for c in checks),
         }
         click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(f"  org:             {config.org}")
-        click.echo(f"  dispatch label:  {config.dispatch_label}")
-        click.echo(f"  default provider: {config.default_provider}")
-        click.echo(f"  conductor effort: {config.conductor_effort}")
+        click.echo(f"  intake label:    {config.intake_label}")
+        click.echo(f"  state prefix:    {config.state_label_prefix}")
+        click.echo(f"  agent provider:  {config.agent_provider}")
+        click.echo(f"  stale after:     {config.agent_stale_after_hours}h")
+        click.echo(f"  auto merge:      {config.auto_merge}")
         click.echo(f"  dry run:         {config.dry_run}")
         click.echo(f"  max issues:      {config.max_issues_per_tick}")
         click.echo(f"  max per repo:    {config.max_per_repo_per_tick}")
@@ -126,7 +127,7 @@ def scan_cmd(as_json: bool) -> None:
         print_banner(subtitle=SUBTITLE_SCAN, version=__version__)
 
     try:
-        issues = scan(org=config.org)
+        issues = scan(org=config.org, label=config.intake_label)
     except ScanError as exc:
         if as_json:
             click.echo(json.dumps({"error": str(exc)}), err=True)
@@ -137,7 +138,8 @@ def scan_cmd(as_json: bool) -> None:
     if as_json:
         payload = {
             "org": config.org,
-            "state_label_prefix": config.dispatch_label,
+            "intake_label": config.intake_label,
+            "state_label_prefix": config.state_label_prefix,
             "count": len(issues),
             "issues": [
                 {
@@ -155,6 +157,7 @@ def scan_cmd(as_json: bool) -> None:
         return
 
     click.echo(f"  org:    {config.org}")
+    click.echo(f"  label:  {config.intake_label}")
     click.echo(f"  found:  {len(issues)} issue(s)")
     click.echo("")
     if not issues:
@@ -168,7 +171,7 @@ def scan_cmd(as_json: bool) -> None:
 @main.command(name="run-once")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human text.")
 def run_once(as_json: bool) -> None:
-    """Process one tick: scan, fan out across repos, dispatch, review, open PRs."""
+    """Process one tick: scan, dispatch, and babysit linked PRs."""
     from dataclasses import asdict
 
     from alchemist.banner import SUBTITLE_TAGLINE
@@ -179,7 +182,7 @@ def run_once(as_json: bool) -> None:
         print_banner(subtitle=f"tick · {SUBTITLE_TAGLINE}", version=__version__)
 
     # Mint and export the App installation token before run_tick so that
-    # run_doctor (and downstream `gh` / `git push` calls) see it. Mint
+    # run_doctor (and downstream `gh` calls) see it. Mint
     # failures fall through to the doctor check, which surfaces them with
     # context — better than crashing the tick before doctor runs.
     with contextlib.suppress(AuthTokenError, ValueError):
@@ -195,7 +198,7 @@ def run_once(as_json: bool) -> None:
         for r in results:
             mark = "✗" if r.error else "✓"
             tag = "[DRY-RUN]" if r.dry_run else "[LIVE]"
-            line = f"  {mark} {tag} {r.repo}#{r.issue_number}"
+            line = f"  {mark} {tag} {r.repo}#{r.issue_number}  [{r.status}]"
             if r.pr_url:
                 merge_tag = "merged" if r.merged else "open" if r.merged is False else "?"
                 line += f"  → {r.pr_url}  [{merge_tag}]"

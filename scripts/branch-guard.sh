@@ -1,26 +1,17 @@
 #!/usr/bin/env bash
 #
-# hooks/branch-guard.sh — Claude Code PreToolUse hook that blocks
+# scripts/branch-guard.sh - Claude Code PreToolUse hook that blocks
 # `git commit` invocations when the current branch is the project's
-# default branch (main/master). Wired via .claude/settings.json shipped
-# in templates/claude-settings.json.
+# default branch (main/master).
 #
-# This is the deterministic enforcement layer for the never-commit-on-
-# default-branch rule documented in principles/git-workflow.md. The
-# .pre-commit-config.yaml hook (no-commit-to-branch) and GitHub branch
-# protection are downstream defenses; this hook fires earlier — at the
-# Claude tool boundary — and prevents the commit attempt rather than
-# rolling it back.
+# The .pre-commit-config.yaml hook and GitHub branch protection are downstream
+# defenses; this hook fires earlier at the Claude tool boundary.
 #
 # Hook protocol:
 #   stdin   — JSON describing the tool call
 #             { "tool_name": "Bash", "tool_input": { "command": "..." }, "cwd": "..." }
 #   exit 0  — allow the tool call
 #   exit 2  — block; stderr is shown to the user and surfaced to Claude
-#
-# Override (documented emergency path): set TOUCHSTONE_EMERGENCY=1 in the
-# environment for the session. The next PR must include an "Emergency-
-# bypass disclosure" section. See principles/git-workflow.md.
 #
 set -euo pipefail
 
@@ -99,13 +90,8 @@ else
 fi
 
 if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-  if [ "${TOUCHSTONE_EMERGENCY:-0}" = "1" ]; then
-    echo "branch-guard: TOUCHSTONE_EMERGENCY=1 — allowing commit on '$branch' (next PR must disclose)" >&2
-    exit 0
-  fi
-
   cat >&2 <<EOF
-==> Blocked by Touchstone branch-guard: on '$branch'
+==> Blocked by branch-guard: on '$branch'
 
   This project doesn't allow direct commits to '$branch'. Branch first:
     git checkout -b feat/<short-description>
@@ -114,9 +100,6 @@ if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
     git checkout -b chore/<short-description>
     git checkout -b refactor/<short-description>
 
-  See principles/git-workflow.md for the full lifecycle.
-
-  Override (emergencies only): set TOUCHSTONE_EMERGENCY=1 and re-run.
 EOF
   exit 2
 fi

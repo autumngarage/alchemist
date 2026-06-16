@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout trusted claim-check helper
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          path: .touchstone-claim-base
+          path: .claim-check-base
 
       - name: Enforce claim-before-dispatch
         env:
@@ -25,7 +25,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          helper=".touchstone-claim-base/scripts/issue-claim-check.sh"
+          helper=".claim-check-base/scripts/issue-claim-check.sh"
           if [ ! -f "$helper" ]; then
             echo "Trusted base helper is unavailable; skipping transition run instead of executing PR-controlled code."
             exit 0

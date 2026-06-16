@@ -23,13 +23,15 @@ def test_defaults_when_no_config_file_or_env(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
     cfg = load_config()
     assert cfg.org == "autumngarage"
-    assert cfg.dispatch_label == "alchemist"
+    assert cfg.intake_label == "agent-ready"
+    assert cfg.state_label_prefix == "alchemist"
+    assert cfg.agent_provider == "codex"
     assert cfg.dry_run is True
     assert cfg.max_issues_per_tick == 1
     assert cfg.max_per_repo_per_tick == 1
     assert cfg.max_concurrent_repos == 1
-    assert cfg.default_provider == "auto"
-    assert cfg.conductor_effort == "medium"
+    assert cfg.agent_stale_after_hours == 24
+    assert cfg.auto_merge is False
     assert cfg.repo_blocklist == ()
 
 
@@ -79,21 +81,25 @@ def test_toml_overrides_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         """
 [alchemist]
 org = "henrymodisett"
-dispatch_label = "alchemist-dispatch"
+intake_label = "ready-for-agent"
+state_label_prefix = "agent"
 dry_run = false
 max_per_repo_per_tick = 3
 max_issues_per_tick = 7
 max_concurrent_repos = 5
+auto_merge = true
 """
     )
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(cfg_file))
     cfg = load_config()
     assert cfg.org == "henrymodisett"
-    assert cfg.dispatch_label == "alchemist-dispatch"
+    assert cfg.intake_label == "ready-for-agent"
+    assert cfg.state_label_prefix == "agent"
     assert cfg.dry_run is False
     assert cfg.max_issues_per_tick == 7
     assert cfg.max_per_repo_per_tick == 3
     assert cfg.max_concurrent_repos == 5
+    assert cfg.auto_merge is True
 
 
 def test_env_var_overrides_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -120,28 +126,30 @@ def test_global_issue_cap_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert cfg.max_issues_per_tick == 4
 
 
-def test_conductor_effort_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_agent_provider_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
-    monkeypatch.setenv("ALCHEMIST_CONDUCTOR_EFFORT", "medium")
+    monkeypatch.setenv("ALCHEMIST_AGENT_PROVIDER", "devin")
+    monkeypatch.setenv("ALCHEMIST_DEVIN_ORG_ID", "org_123")
     cfg = load_config()
-    assert cfg.conductor_effort == "medium"
+    assert cfg.agent_provider == "devin"
+    assert cfg.devin_org_id == "org_123"
 
 
-def test_provider_env_var_can_pin_conductor_provider(
+def test_provider_env_var_compatibility_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
-    monkeypatch.setenv("ALCHEMIST_PROVIDER", "openrouter")
+    monkeypatch.setenv("ALCHEMIST_PROVIDER", "devin")
     cfg = load_config()
-    assert cfg.default_provider == "openrouter"
+    assert cfg.agent_provider == "devin"
 
 
-def test_conductor_effort_rejects_unknown_value(
+def test_agent_provider_rejects_unknown_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("ALCHEMIST_CONFIG", str(tmp_path / "missing.toml"))
-    monkeypatch.setenv("ALCHEMIST_CONDUCTOR_EFFORT", "expensive")
-    with pytest.raises(ValueError, match="conductor_effort"):
+    monkeypatch.setenv("ALCHEMIST_AGENT_PROVIDER", "openrouter")
+    with pytest.raises(ValueError, match="agent_provider"):
         load_config()
 
 
@@ -156,18 +164,19 @@ def test_config_is_frozen():
     """Config dataclass is immutable so no surprise mutations across the runner."""
     cfg = Config(
         org="x",
-        dispatch_label="y",
-        default_provider="kimi",
-        default_budget="$1",
+        intake_label="agent-ready",
+        state_label_prefix="alchemist",
+        agent_provider="codex",
         poll_interval_minutes=5,
         state_dir=Path("/tmp"),
         dry_run=True,
         max_issues_per_tick=1,
         max_per_repo_per_tick=1,
         max_concurrent_repos=1,
-        conductor_effort="low",
-        conductor_timeout_sec=600,
-        review_timeout_sec=300,
+        agent_stale_after_hours=24,
+        auto_merge=False,
+        devin_api_key_env="DEVIN_API_KEY",
+        devin_org_id="",
         github_token_env="GITHUB_TOKEN",
         assignee_user="@me",
         repo_blocklist=(),

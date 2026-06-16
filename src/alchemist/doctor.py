@@ -1,9 +1,8 @@
 """Health check — verify external CLIs, env vars, and writable state.
 
 Run before each cron tick (and as a standalone command). A clean doctor
-output means the next `run-once` tick has everything it needs to make
-forward progress; a failed doctor short-circuits the tick with a clear
-error rather than silently producing a half-built PR.
+output means the next `run-once` tick has everything it needs to coordinate
+issues and PRs; a failed doctor short-circuits the tick with a clear error.
 """
 
 from __future__ import annotations
@@ -12,12 +11,13 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from alchemist.auth_token import AuthTokenError, mint_installation_token
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from alchemist.config import Config
 
 
@@ -101,58 +101,38 @@ def _state_dir_check(path: Path) -> Check:
     return Check(name="state dir", ok=True, detail=f"{path} writable")
 
 
-def _touchstone_merge_pr_script_check() -> Check:
-    """Locate touchstone's merge-pr.sh — alchemist's review-and-merge gate.
-
-    Looks at $TOUCHSTONE_ROOT first, then `brew --prefix touchstone`/libexec,
-    then /opt/touchstone (Linux container convention).
-    """
-    candidates: list[Path] = []
-    env_root = os.environ.get("TOUCHSTONE_ROOT")
-    if env_root:
-        candidates.append(Path(env_root) / "scripts" / "merge-pr.sh")
-        candidates.append(Path(env_root) / "libexec" / "scripts" / "merge-pr.sh")
-
-    try:
-        result = subprocess.run(  # noqa: S603,S607 — brew is on PATH; deterministic args
-            ["brew", "--prefix", "touchstone"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+def _agent_provider_check(config: Config) -> Check:
+    if config.agent_provider == "codex":
+        return Check(
+            name="agent provider",
+            ok=True,
+            detail="codex via GitHub @codex comments",
         )
-        if result.returncode == 0:
-            brew_root = Path(result.stdout.strip())
-            candidates.append(brew_root / "libexec" / "scripts" / "merge-pr.sh")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    candidates.append(Path("/opt/touchstone/scripts/merge-pr.sh"))
-    candidates.append(Path("/opt/touchstone/libexec/scripts/merge-pr.sh"))
-
-    for candidate in candidates:
-        if candidate.exists():
+    if config.agent_provider == "devin":
+        api_key = os.environ.get(config.devin_api_key_env)
+        if not api_key:
             return Check(
-                name="touchstone merge-pr.sh",
-                ok=True,
-                detail=f"found at {candidate}",
+                name="agent provider",
+                ok=False,
+                detail=f"${config.devin_api_key_env} not set for Devin API dispatch",
             )
-    return Check(
-        name="touchstone merge-pr.sh",
-        ok=False,
-        detail="not found — set $TOUCHSTONE_ROOT or install via brew",
-    )
+        if not config.devin_org_id:
+            return Check(
+                name="agent provider",
+                ok=False,
+                detail="ALCHEMIST_DEVIN_ORG_ID not set for Devin API dispatch",
+            )
+        return Check(name="agent provider", ok=True, detail="devin API dispatch configured")
+    return Check(name="agent provider", ok=False, detail=f"unsupported {config.agent_provider}")
 
 
 def run_doctor(config: Config) -> list[Check]:
     """Run all health checks and return the results."""
     checks = [
         _which_check("gh", "install GitHub CLI: https://cli.github.com/"),
-        _which_check("git", "git is required"),
-        _which_check("conductor", "brew install autumngarage/conductor/conductor"),
-        _which_check("touchstone", "brew install autumngarage/touchstone/touchstone"),
         _gh_auth_check(config),
+        _agent_provider_check(config),
         _state_dir_check(config.state_dir),
-        _touchstone_merge_pr_script_check(),
     ]
     if "ALCHEMIST_LABEL" in os.environ:
         checks.append(
@@ -160,9 +140,8 @@ def run_doctor(config: Config) -> list[Check]:
                 name="config deprecation",
                 ok=True,
                 detail=(
-                    "ALCHEMIST_LABEL is deprecated — alchemist no longer requires a dispatch "
-                    "label. The variable is honored for the state-label prefix but no longer "
-                    "gates scanning."
+                    "ALCHEMIST_LABEL is deprecated — use ALCHEMIST_STATE_LABEL_PREFIX "
+                    "for state labels and ALCHEMIST_INTAKE_LABEL for the intake queue."
                 ),
             )
         )

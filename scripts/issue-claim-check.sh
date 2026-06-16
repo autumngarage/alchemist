@@ -201,7 +201,7 @@ trap cleanup EXIT
 
 if [ -n "$PR_NUMBER" ]; then
   if [ -z "$BODY_FILE" ]; then
-    OWNED_BODY_FILE="$(mktemp -t touchstone-claim-body.XXXXXX)"
+    OWNED_BODY_FILE="$(mktemp -t alchemist-claim-body.XXXXXX)"
     BODY_FILE="$OWNED_BODY_FILE"
     gh pr view "$PR_NUMBER" --json body,author --jq '.body // ""' >"$BODY_FILE"
   fi
@@ -212,8 +212,8 @@ if grep -Eqi '\[skip-claim-check\]' "$BODY_FILE"; then
   exit 0
 fi
 
-issue_refs_file="$(mktemp -t touchstone-claim-refs.XXXXXX)"
-failures_file="$(mktemp -t touchstone-claim-failures.XXXXXX)"
+issue_refs_file="$(mktemp -t alchemist-claim-refs.XXXXXX)"
+failures_file="$(mktemp -t alchemist-claim-failures.XXXXXX)"
 comment_file=""
 trap 'rm -f "$issue_refs_file" "$failures_file" "$comment_file"; cleanup' EXIT
 
@@ -265,7 +265,7 @@ fi
 write_failure_report "$failures_file" "$PR_AUTHOR" "terminal"
 
 if [ "$COMMENT_PR" = true ]; then
-  comment_file="$(mktemp -t touchstone-claim-comment.XXXXXX)"
+  comment_file="$(mktemp -t alchemist-claim-comment.XXXXXX)"
   write_failure_report "$failures_file" "$PR_AUTHOR" "markdown" >"$comment_file"
   gh pr comment "$PR_NUMBER" --body-file "$comment_file"
   echo "Issue claim check failed; remediation comment posted to PR #$PR_NUMBER."

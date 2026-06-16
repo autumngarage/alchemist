@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 def test_acquire_creates_and_removes_lockfile(tmp_path: Path):
-    repo = "autumngarage/touchstone"
+    repo = "autumngarage/widgets"
     with acquire(tmp_path, repo) as lock_path:
         assert lock_path.exists()
         payload = json.loads(lock_path.read_text())
@@ -28,7 +28,7 @@ def test_acquire_creates_and_removes_lockfile(tmp_path: Path):
 
 
 def test_acquire_busy_raises(tmp_path: Path):
-    repo = "autumngarage/touchstone"
+    repo = "autumngarage/widgets"
     with acquire(tmp_path, repo), pytest.raises(LockBusyError), acquire(tmp_path, repo):
         pass  # pragma: no cover — should never enter
 
@@ -36,14 +36,14 @@ def test_acquire_busy_raises(tmp_path: Path):
 def test_two_different_repos_can_lock_simultaneously(tmp_path: Path):
     """The whole point of per-repo locking — different repos don't block each other."""
     with (
-        acquire(tmp_path, "autumngarage/touchstone"),
+        acquire(tmp_path, "autumngarage/widgets"),
         acquire(tmp_path, "autumngarage/cortex") as inner,
     ):
         assert inner.exists()
 
 
 def test_lockfile_cleaned_up_after_exception(tmp_path: Path):
-    repo = "autumngarage/touchstone"
+    repo = "autumngarage/widgets"
     expected_path = tmp_path / "locks" / f"{repo.replace('/', '-')}.lock"
     with pytest.raises(RuntimeError, match="boom"), acquire(tmp_path, repo):
         raise RuntimeError("boom")
@@ -63,7 +63,7 @@ def test_repo_slug_replaces_slash(tmp_path: Path):
 
 
 def test_fresh_existing_lock_is_locked(tmp_path: Path):
-    repo = "autumngarage/touchstone"
+    repo = "autumngarage/widgets"
     with (
         acquire(tmp_path, repo),
         pytest.raises(LockBusyError),
@@ -74,8 +74,8 @@ def test_fresh_existing_lock_is_locked(tmp_path: Path):
 
 
 def test_orphaned_lockfile_is_reclaimed_on_acquire(tmp_path: Path):
-    repo = "autumngarage/touchstone"
-    lock_path = tmp_path / "locks" / "autumngarage-touchstone.lock"
+    repo = "autumngarage/widgets"
+    lock_path = tmp_path / "locks" / "autumngarage-widgets.lock"
     lock_path.parent.mkdir(parents=True)
     lock_path.write_text(
         json.dumps({"repo": repo, "started_at": "old", "pid": 999999, "lock_mode": "flock"})
@@ -88,8 +88,8 @@ def test_orphaned_lockfile_is_reclaimed_on_acquire(tmp_path: Path):
 
 
 def test_fresh_legacy_lockfile_is_busy_during_migration(tmp_path: Path):
-    repo = "autumngarage/touchstone"
-    lock_path = tmp_path / "locks" / "autumngarage-touchstone.lock"
+    repo = "autumngarage/widgets"
+    lock_path = tmp_path / "locks" / "autumngarage-widgets.lock"
     lock_path.parent.mkdir(parents=True)
     lock_path.write_text(
         json.dumps({
@@ -105,8 +105,8 @@ def test_fresh_legacy_lockfile_is_busy_during_migration(tmp_path: Path):
 
 
 def test_stale_legacy_lockfile_is_reclaimed_on_acquire(tmp_path: Path):
-    repo = "autumngarage/touchstone"
-    lock_path = tmp_path / "locks" / "autumngarage-touchstone.lock"
+    repo = "autumngarage/widgets"
+    lock_path = tmp_path / "locks" / "autumngarage-widgets.lock"
     lock_path.parent.mkdir(parents=True)
     old_started = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
     lock_path.write_text(json.dumps({"repo": repo, "started_at": old_started, "pid": 999999}))
@@ -126,7 +126,7 @@ def test_acquire_retries_when_legacy_lock_disappears_mid_open(
 
     def flaky_open(path, flags, mode=0o777):
         nonlocal calls
-        if str(path).endswith("autumngarage-touchstone.lock"):
+        if str(path).endswith("autumngarage-widgets.lock"):
             calls += 1
             if calls == 1:
                 raise FileExistsError(path)
@@ -136,14 +136,14 @@ def test_acquire_retries_when_legacy_lock_disappears_mid_open(
 
     monkeypatch.setattr(os, "open", flaky_open)
 
-    with acquire(tmp_path, "autumngarage/touchstone") as lock_path:
+    with acquire(tmp_path, "autumngarage/widgets") as lock_path:
         assert lock_path.exists()
     assert calls >= 3
 
 
 def test_corrupt_stale_legacy_lockfile_is_reclaimed(tmp_path: Path):
-    repo = "autumngarage/touchstone"
-    lock_path = tmp_path / "locks" / "autumngarage-touchstone.lock"
+    repo = "autumngarage/widgets"
+    lock_path = tmp_path / "locks" / "autumngarage-widgets.lock"
     lock_path.parent.mkdir(parents=True)
     lock_path.write_text("not json")
     old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()

@@ -142,8 +142,8 @@ else
   if [ -z "$CURRENT_BRANCH" ]; then
     CURRENT_BRANCH="(detached-head)"
   fi
-  AGENT_LABEL="${TOUCHSTONE_AGENT_LABEL:-$(whoami)}"
-  COMMENT_BODY="Dispatched: branch \`$CURRENT_BRANCH\`, agent \`${AGENT_LABEL}\` claiming this issue. PR will land via \`scripts/open-pr.sh --auto-merge\`."
+  AGENT_LABEL="${ALCHEMIST_AGENT_LABEL:-$(whoami)}"
+  COMMENT_BODY="Dispatched: branch \`$CURRENT_BRANCH\`, agent \`${AGENT_LABEL}\` claiming this issue. PR will land through the normal GitHub PR checks and review flow."
 fi
 
 if [ -n "$COMMENT_BODY" ]; then

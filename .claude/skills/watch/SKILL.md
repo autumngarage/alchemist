@@ -3,7 +3,7 @@ name: watch
 description: Stream live logs from the alchemist Railway cron service so the operator can see what alchemist is doing right now. Use when the user says "watch alchemist", "tail alchemist", "see what alchemist is doing", "monitor the cron", or "show me the live logs". Falls back from a split-pane Vesper window to the current shell when Vesper isn't available.
 ---
 
-Stream Railway's deployment logs for `alchemist-cron` in follow mode so the operator can watch cron ticks in real time. Each tick fires every 5 minutes; logs include doctor checks, scan results, conductor exec progress, push/PR/merge events, and the JSON `RunResult` per dispatched issue.
+Stream Railway's deployment logs for `alchemist-cron` in follow mode so the operator can watch cron ticks in real time. Each tick fires every 5 minutes; logs include doctor checks, scan results, dispatch comments/API calls, PR watching, and the JSON `RunResult` per handled issue.
 
 ## When to invoke
 
@@ -77,22 +77,18 @@ Starting Container
     __ _| | ___| |__   ___ _ __ ___ (_)___| |_
    / _` | |/ __| '_ \ / _ \ '_ ` _ \| / __| __|
   ...
-  ✓ gh, git, conductor, touchstone — all green
-  org: autumngarage  ·  label: alchemist-test
-  ✓ doctor passed
-Cloning into '/var/alchemist/state/work/autumngarage-touchstone-N'...
-Switched to branch 'alchemist/issue-N-...'
-[branch hash] alchemist: <issue title>
-remote: ...
+alchemist tick: 1 processed (dispatched=1 waiting=0 pr_open=0 merged=0 blocked=0 errored=0 fatal=0) in 2.1s
 [
   {
-    "repo": "autumngarage/touchstone",
+    "repo": "autumngarage/alchemist",
     "issue_number": N,
-    "pr_url": "https://github.com/.../pull/M",
-    "merged": true,
+    "pr_url": null,
+    "merged": null,
     "error": null,
-    "elapsed_sec": 89.2,
-    "dry_run": false
+    "elapsed_sec": 2.1,
+    "dry_run": false,
+    "branch": null,
+    "status": "dispatched"
   }
 ]
 ```
