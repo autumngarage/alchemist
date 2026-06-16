@@ -1,18 +1,8 @@
-# Pre-commit hooks — installed via: pre-commit install --install-hooks
-# Docs: https://pre-commit.com
-#
-# Hooks run at two stages:
-#   pre-commit: fast checks on every commit (formatting, secrets, file hygiene)
-#   pre-push:   fast branch checks; AI review only runs for default-branch pushes
+# Pre-commit hooks - installed with:
+#   pre-commit install --install-hooks
+#   pre-commit install --hook-type pre-push
 
 repos:
-  # ── Standard file hygiene ──────────────────────────────────────────────
-  # Cortex append-only exclusions: `.cortex/journal/` is append-only and
-  # `.cortex/doctrine/` is immutable-with-supersede (see Cortex Protocol §4.1,
-  # §4.2). Pre-commit rewriting trailing whitespace or final newlines in
-  # those files violates the contract — the entries' content must not change
-  # after the original write. Excluding them here keeps the hook useful
-  # everywhere else while respecting the protocol.
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -24,44 +14,38 @@ repos:
       - id: check-json
         exclude: tsconfig.*\.json$
       - id: check-added-large-files
-        args: ['--maxkb=500']
+        args: ["--maxkb=500"]
       - id: detect-private-key
       - id: no-commit-to-branch
-        args: ['--branch', 'main', '--branch', 'master']
+        args: ["--branch", "main", "--branch", "master"]
         stages: [pre-commit]
       - id: check-merge-conflict
 
-  # ── Secret scanning ────────────────────────────────────────────────────
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.22.1
     hooks:
       - id: gitleaks
 
-  # ── Shell script quality ───────────────────────────────────────────────
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
     hooks:
       - id: shellcheck
-        args: ['--severity=warning']
+        args: ["--severity=warning"]
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
     hooks:
       - id: shfmt
-        # Match Touchstone's 2-space shell style while making case blocks and
-        # binary operators deterministic.
-        args: ['-i', '2', '-ci', '-bn']
-        exclude: ^(completions/|prototypes/)
+        args: ["-i", "2", "-ci", "-bn"]
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
     rev: v0.46.0
     hooks:
       - id: markdownlint
-        args: ['--config', '.markdownlint.json']
-        files: ^([^/]+\.md|principles/.*\.md|audits/.*\.md|feedback/.*\.md|templates/.*\.md)$
+        args: ["--config", ".markdownlint.json"]
+        files: ^([^/]+\.md|docs/.*\.md)$
         exclude: ^\.cortex/
 
-  # ── Branch naming enforcement ──────────────────────────────────────────
   - repo: local
     hooks:
       - id: branch-naming
@@ -75,41 +59,10 @@ repos:
         always_run: true
         pass_filenames: false
 
-  # ── AI default-branch push review ──────────────────────────────────────
-  - repo: local
-    hooks:
-      - id: codex-review
-        name: AI default-branch push review
-        entry: /usr/bin/env bash scripts/codex-review.sh
+      - id: project-validate
+        name: Project validation
+        entry: bash scripts/validate.sh
         language: system
         stages: [pre-push]
         always_run: true
         pass_filenames: false
-
-  # ── Project profile checks ─────────────────────────────────────────────
-  # scripts/touchstone-run.sh reads .touchstone-config and dispatches to the
-  # appropriate Node/TypeScript, Swift, Rust, Python, Go, or monorepo commands.
-  - repo: local
-    hooks:
-      - id: touchstone-validate
-        name: Touchstone project validation
-        entry: >-
-          /usr/bin/env env
-          -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE
-          -u PRE_COMMIT -u PRE_COMMIT_FROM_REF -u PRE_COMMIT_TO_REF
-          -u PRE_COMMIT_LOCAL_BRANCH -u PRE_COMMIT_REMOTE_BRANCH
-          -u PRE_COMMIT_REMOTE_NAME -u PRE_COMMIT_REMOTE_URL
-          bash scripts/touchstone-run.sh validate
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-  - repo: local
-    hooks:
-      - id: conductor-refresh
-        name: Refresh conductor integrations if stale
-        entry: conductor refresh-on-commit
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit]

@@ -42,6 +42,5 @@ def test_railway_image_does_not_bundle_local_agent_stack():
     repo_root = Path(__file__).resolve().parents[1]
     dockerfile = (repo_root / "Dockerfile").read_text()
 
-    assert "conductor.git" not in dockerfile
-    assert "touchstone.git" not in dockerfile
+    assert "git clone" not in dockerfile
     assert "uv==" not in dockerfile

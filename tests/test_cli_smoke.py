@@ -186,7 +186,7 @@ def test_run_once_exits_zero_when_all_errors_are_benign(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
     benign = [
         RunResult(
-            repo="autumngarage/touchstone",
+            repo="autumngarage/widgets",
             issue_number=1,
             pr_url=None,
             merged=None,
@@ -222,7 +222,7 @@ def test_run_once_exits_zero_when_issue_level_tool_error(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
     handled = [
         RunResult(
-            repo="autumngarage/touchstone",
+            repo="autumngarage/widgets",
             issue_number=1,
             pr_url=None,
             merged=None,

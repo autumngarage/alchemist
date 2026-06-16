@@ -9,10 +9,8 @@ the repo scope and runtime defaults for our internal deployment.
 Initial watched repos:
 
 - `autumngarage/alchemist`
-- `autumngarage/conductor`
 - `autumngarage/cortex`
 - `autumngarage/sentinel`
-- `autumngarage/touchstone`
 - `autumngarage/autumn-garage`
 
 Excluded from the first internal rollout:
@@ -65,7 +63,7 @@ railway variable set ALCHEMIST_MAX_PER_REPO_PER_TICK=1 --service alchemist-cron
 railway variable set ALCHEMIST_MAX_CONCURRENT_REPOS=1 --service alchemist-cron
 railway variable set ALCHEMIST_AGENT_STALE_AFTER_HOURS=24 --service alchemist-cron
 railway variable set ALCHEMIST_AUTO_MERGE=false --service alchemist-cron
-railway variable set ALCHEMIST_REPO_BLOCKLIST=homebrew-touchstone,homebrew-conductor,homebrew-sentinel,homebrew-cortex,homebrew-alchemist,autumn-mail --service alchemist-cron
+railway variable set ALCHEMIST_REPO_BLOCKLIST=homebrew-sentinel,homebrew-cortex,homebrew-alchemist,autumn-mail --service alchemist-cron
 ```
 
 Secrets still come from the operator runbook:

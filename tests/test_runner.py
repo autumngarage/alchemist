@@ -64,8 +64,8 @@ def _issue(
         number=num,
         title=f"Fix issue {num}",
         body="Please fix this.",
-        url=f"https://github.com/autumngarage/touchstone/issues/{num}",
-        repository="autumngarage/touchstone",
+        url=f"https://github.com/autumngarage/widgets/issues/{num}",
+        repository="autumngarage/widgets",
         updated_at=updated_at,
         labels=labels,
     )
@@ -181,7 +181,7 @@ def _pr_state(
     comments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
-        "url": "https://github.com/autumngarage/touchstone/pull/99",
+        "url": "https://github.com/autumngarage/widgets/pull/99",
         "number": 99,
         "state": state,
         "mergedAt": merged_at,
@@ -281,7 +281,7 @@ def test_devin_session_create_posts_prompt_to_configured_org(
     assert captured["method"] == "POST"
     assert captured["headers"]["Authorization"] == "Bearer cog_secret"
     assert captured["timeout"] == 30
-    assert "Repository: `autumngarage/touchstone`" in captured["payload"]["prompt"]
+    assert "Repository: `autumngarage/widgets`" in captured["payload"]["prompt"]
     assert "Closes #7" in captured["payload"]["prompt"]
 
 

@@ -1,23 +1,12 @@
-"""ASCII hero banner for `alchemist scan`, `doctor`, and other splash moments.
-
-Mirrors conductor's banner pattern — wordmark embedded as a string literal so
-no figlet runtime dependency, ANSI-colored when a TTY is attached.
-
-Doctrine 0007 hue assignment for alchemist: pastel amber (222) primary,
-pale gold (230) accent. Distinguishes from touchstone (peach 216/223),
-cortex (aqua 152/159), sentinel (sage 151/157), conductor (lavender 147/183),
-and the autumn-garage meta-repo (rose 181/217). The amber/gold echoes the
-alchemical-gold metaphor.
-"""
+"""ASCII hero banner for `alchemist scan`, `doctor`, and other splash moments."""
 
 from __future__ import annotations
 
 import os
 import sys
 
-# Rendered from `figlet -f standard alchemist` and embedded so we don't take
-# a runtime dep. Keep the glyphs aligned — editors that strip trailing
-# whitespace may break the art.
+# Rendered from `figlet -f standard alchemist` and embedded so we don't take a
+# runtime dependency.
 _ALCHEMIST_GLYPHS: tuple[str, ...] = (
     r"       _      _                    _     _   ",
     r"  __ _| | ___| |__   ___ _ __ ___ (_)___| |_ ",

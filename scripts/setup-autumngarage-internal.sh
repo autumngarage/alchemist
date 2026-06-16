@@ -17,10 +17,8 @@ STATE_PREFIX=alchemist
 
 REPOS=(
   autumngarage/alchemist
-  autumngarage/conductor
   autumngarage/cortex
   autumngarage/sentinel
-  autumngarage/touchstone
   autumngarage/autumn-garage
 )
 
