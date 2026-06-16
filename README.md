@@ -1,29 +1,31 @@
 # Alchemist
 
-Issue-driven transmuter for the [Autumn Garage](https://github.com/autumngarage) family.
+Issue dispatcher and PR babysitter for the
+[Autumn Garage](https://github.com/autumngarage) family.
 
-A user files a GitHub issue in a watched org. Within ~5 minutes, Alchemist
-scans eligible open issues, skips issues already carrying an Alchemist state
-label or `alchemist-skip`, dispatches one bounded unit of work to
-[Conductor](https://github.com/autumngarage/conductor)'s agentic loop on a
-fresh feature branch, opens a PR, and hands it to
-[Touchstone](https://github.com/autumngarage/touchstone)'s `merge-pr.sh` which runs the AI
-code-review gate and squash-merges on a CLEAN verdict. BLOCKED reviews leave the PR open
-with comments for human triage.
+A user labels a GitHub issue `agent-ready`. On each Railway cron tick,
+Alchemist scans that explicit queue, claims one bounded unit of work, triggers
+an external coding agent, and then watches for the PR that references the issue.
+It never clones target repositories, runs an LLM locally, commits code, or opens
+the implementation PR itself.
 
-Alchemist never speaks to an LLM directly (every model call goes through Conductor) and
-never makes a quality judgment (Touchstone owns review-and-merge). It is purely the
-orchestrator: GitHub I/O, git plumbing, and per-repo locking around its two peers.
+Alchemist owns GitHub coordination only:
 
-Every commit and PR is signed `Alchemist <alchemist@autumngarage.dev>` with a `[alchemist]`
-title prefix so the audit trail in `git log` and PR lists is unambiguous.
+- intake labels and state labels
+- one issue per repo locks
+- Codex or Devin dispatch
+- linked PR detection
+- one-shot follow-up nudges for failed checks or requested changes
+- optional GitHub auto-merge when a PR is ready
+
+The external agent owns investigation, implementation, tests, commits, and PR
+creation.
 
 ## Status
 
 Alchemist runs as a remote Railway cron service, not as a long-lived local
-daemon. The local CLI is for setup, diagnostics, and one-off dry runs; the
-production path is Railway invoking `alchemist run-once --json` on its cron
-schedule.
+daemon. The production path is Railway invoking `alchemist run-once --json` on
+its cron schedule.
 
 Use local `doctor` to check this checkout:
 
@@ -37,122 +39,94 @@ Use Railway deployment logs to check the deployed runtime:
 railway logs --service alchemist-cron --deployment
 ```
 
-Use Railway vars for a local env-parity check from this source checkout:
-
-```bash
-railway run --service alchemist-cron --no-local -- uv run alchemist doctor --json
-```
-
-For deployment and dogfood guidance, use the operator runbook:
-[`docs/operator-runbook.md`](docs/operator-runbook.md).
-
-## How it composes
-
-| Tool | Role |
-|---|---|
-| **Touchstone** | review gate (invoked headless via `scripts/merge-pr.sh`) |
-| **Cortex** | optional journal author for each transmute cycle (target repo's `.cortex/journal/`) |
-| **Conductor** | LLM router for the agentic fix loop (`conductor exec --tools ...`) |
-| **Alchemist** | the orchestrator — GitHub I/O, branch state, lockfile, label transitions |
-
-Alchemist composes by file/CLI contract, never by code import (Doctrine 0001/0003/0004).
-
-## Install
-
-```bash
-brew install autumngarage/alchemist/alchemist
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/autumngarage/alchemist.git
-cd alchemist
-uv sync
-uv run alchemist doctor
-```
-
 ## Configure
 
-A single TOML config file at `$ALCHEMIST_CONFIG` (defaults to `~/.alchemist/config.toml`,
-or `/etc/alchemist/config.toml` for the Railway deploy):
+A single TOML config file at `$ALCHEMIST_CONFIG` (defaults to
+`~/.alchemist/config.toml`, or `/etc/alchemist/config.toml` for the Railway
+deploy):
 
 ```toml
 [alchemist]
 org = "autumngarage"
-poll_interval_minutes = 5
-default_budget = "$2"
-default_provider = "auto"
-conductor_effort = "medium"       # production default; override per deployment as needed
-dispatch_label = "alchemist"       # state-label prefix: alchemist-working/error/etc.
-dry_run = true                     # flip to false after dogfood A
+intake_label = "agent-ready"
+state_label_prefix = "alchemist"
+agent_provider = "codex"          # codex or devin
+dry_run = true
 state_dir = "/var/alchemist/state"
-max_issues_per_tick = 1            # global blast-radius cap for the first week
+max_issues_per_tick = 1
 max_per_repo_per_tick = 1
 max_concurrent_repos = 1
+agent_stale_after_hours = 24
+auto_merge = false
 ```
 
-`default_budget` caps conductor spend per dispatched issue. After conductor
-exec finishes, alchemist sums `cost_usd` from the structured NDJSON event log
-and bails (`error: "budget-exceeded: $X spent vs $Y budgeted"`) if the run
-exceeded it — the issue lands in `-error` for human triage. Set to `"$0"` or
-empty to disable enforcement.
+Environment variables override config:
 
-For unusually substantive issues, operators can opt that one issue into a
-longer Conductor run by adding an annotation to the issue body:
+- `ALCHEMIST_ORG`
+- `ALCHEMIST_INTAKE_LABEL`
+- `ALCHEMIST_STATE_LABEL_PREFIX`
+- `ALCHEMIST_AGENT_PROVIDER` or legacy `ALCHEMIST_PROVIDER`
+- `ALCHEMIST_DRY_RUN`
+- `ALCHEMIST_STATE_DIR`
+- `ALCHEMIST_MAX_ISSUES_PER_TICK`
+- `ALCHEMIST_MAX_PER_REPO_PER_TICK`
+- `ALCHEMIST_MAX_CONCURRENT_REPOS`
+- `ALCHEMIST_AGENT_STALE_AFTER_HOURS`
+- `ALCHEMIST_AUTO_MERGE`
+- `ALCHEMIST_REPO_BLOCKLIST`
 
-```text
-alchemist-timeout: 25m
-```
-
-`alchemist-conductor-timeout: 1500s` is accepted as an equivalent explicit
-form. Overrides are bounded to 60-3600 seconds so a single issue cannot silently
-turn into an unbounded provider spend.
-
-Env vars override config: `ALCHEMIST_ORG`, `ALCHEMIST_LABEL`, `ALCHEMIST_DRY_RUN`,
-`ALCHEMIST_PROVIDER`, `ALCHEMIST_BUDGET`, `ALCHEMIST_STATE_DIR`,
-`ALCHEMIST_MAX_ISSUES_PER_TICK`, `ALCHEMIST_MAX_PER_REPO_PER_TICK`,
-`ALCHEMIST_MAX_CONCURRENT_REPOS`, `ALCHEMIST_CONDUCTOR_EFFORT`.
-
-`default_provider = "auto"` delegates provider selection to Conductor's native
-router. Set `ALCHEMIST_PROVIDER=openrouter`, `codex`, `claude`, etc. only when
-you intentionally want to pin a provider for the worker loop.
-
-`ALCHEMIST_LABEL` is retained as the state-label prefix for compatibility. It
-does not gate intake: Alchemist scans open issues and skips issues with an
-Alchemist state label, `alchemist-skip`, or a blocked repository.
+`ALCHEMIST_LABEL` is retained as a compatibility alias for
+`ALCHEMIST_STATE_LABEL_PREFIX`. It does not define the intake queue.
 
 Required externally:
-- GitHub auth — either `GITHUB_TOKEN` with `issues:rw`, `pull_requests:rw`,
-  `contents:rw`, or GitHub App env vars (`ALCHEMIST_APP_ID`,
+
+- GitHub auth: either `GITHUB_TOKEN` with issue, PR, and metadata access, or
+  GitHub App env vars (`ALCHEMIST_APP_ID`,
   `ALCHEMIST_APP_INSTALLATION_ID`, `ALCHEMIST_APP_PRIVATE_KEY`) so Alchemist can
   mint an installation token per tick.
-- LLM provider credentials for Conductor. Headless Railway deployments usually
-  need `OPENROUTER_API_KEY` unless the image also installs and authenticates a
-  local CLI-backed provider that Conductor can route to.
+- Codex: Codex cloud and GitHub integration enabled for the target repos.
+  Alchemist triggers Codex by commenting `@codex` on the issue or PR.
+- Devin: set `ALCHEMIST_AGENT_PROVIDER=devin`, `DEVIN_API_KEY`, and
+  `ALCHEMIST_DEVIN_ORG_ID`. Alchemist creates Devin sessions through the Devin
+  API and posts the session URL back to the issue.
 
-## Going live (the dogfood gates)
+## State Labels
 
-Three transitions, each manual. The tool never auto-graduates.
+For state prefix `alchemist`, Alchemist creates and uses:
 
-1. **Dogfood A** — `dry_run=true`. File a tiny test issue.
-   Verify cron tick + log output. No side effects.
-2. **Dogfood B** — `dry_run=false`. File one tiny
-   test issue. Real PR opens. Inspect and merge or reject.
-3. **Live** — keep `max_issues_per_tick=1` and `max_concurrent_repos=1` for one
-   week, then lift them deliberately to enable cross-repo swarm.
+- `agent-ready`: explicit intake queue
+- `alchemist-dispatched`: external agent has been asked to work
+- `alchemist-pr-open`: linked PR exists and is being watched
+- `alchemist-blocked`: human triage needed
+- `alchemist-shipped`: linked PR merged
+- `alchemist-error`: coordinator failure
+- `alchemist-skip`: opt out
 
-Full operator walkthrough including Railway provisioning, common failure modes,
-and tuning knobs lives at [`docs/operator-runbook.md`](docs/operator-runbook.md).
+## Lifecycle
+
+1. Add `agent-ready` to an actionable issue.
+2. Alchemist replaces it with `alchemist-dispatched` and triggers Codex or
+   Devin.
+3. The external agent investigates and opens a PR with `Closes #N` in the body.
+4. Alchemist finds that PR, marks the issue `alchemist-pr-open`, and watches
+   checks/reviews.
+5. If checks fail or changes are requested, Alchemist nudges the same agent
+   once.
+6. If the PR merges, Alchemist marks the issue `alchemist-shipped`.
+7. If no PR appears before `agent_stale_after_hours`, Alchemist marks the issue
+   `alchemist-blocked`.
+
+Set `auto_merge=true` only if GitHub branch protection is already the merge
+gate you want. Alchemist then runs `gh pr merge --squash --auto` for PRs with
+successful checks and no requested changes.
 
 ## Falsification
 
-If, six months after v0.1 ships, fewer than half of eligible issues result in a
-merged Alchemist PR, OR if eligible issue volume stays under ~5 issues per month across
-the watched repos, Alchemist failed to be useful and should be wound down. The fix
-would be in Conductor's agentic loop or in brief-rendering, not in adding more
-autonomy to Alchemist.
+Keep this service only if it reduces coordination work. If the issue queue is
+low, if most dispatched issues still need manual hand-holding, or if Codex/Devin
+native automations cover the workflow directly, wind Alchemist down and keep the
+state-label pattern as documentation.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT - see `LICENSE`.

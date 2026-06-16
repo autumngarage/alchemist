@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -38,12 +37,11 @@ def test_railway_entrypoint_runs_tick_without_pat(tmp_path: Path):
     assert "Tool Refresh" not in result.stdout
 
 
-def test_railway_image_uses_uv_new_enough_for_dynamic_project_versions():
-    """Old uv builds failed `uv sync` on hatch-vcs/dynamic-version projects."""
+def test_railway_image_does_not_bundle_local_agent_stack():
+    """The runtime coordinates GitHub state; Codex/Devin run outside the image."""
     repo_root = Path(__file__).resolve().parents[1]
     dockerfile = (repo_root / "Dockerfile").read_text()
-    match = re.search(r"^ARG UV_VERSION=([0-9]+)\.([0-9]+)\.([0-9]+)$", dockerfile, re.M)
 
-    assert match is not None
-    major, minor, patch = (int(part) for part in match.groups())
-    assert (major, minor, patch) >= (0, 11, 0)
+    assert "conductor.git" not in dockerfile
+    assert "touchstone.git" not in dockerfile
+    assert "uv==" not in dockerfile

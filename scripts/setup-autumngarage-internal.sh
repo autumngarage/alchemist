@@ -7,13 +7,13 @@
 # Usage:
 #   bash scripts/setup-autumngarage-internal.sh
 #   bash scripts/setup-autumngarage-internal.sh --execute
-#   bash scripts/setup-autumngarage-internal.sh --execute --dispatch-only
 #   bash scripts/setup-autumngarage-internal.sh --repos autumngarage/alchemist,autumngarage/cortex
 #
 set -euo pipefail
 
 DRY_RUN=1
-INCLUDE_TEST_LABELS=1
+INTAKE_LABEL=agent-ready
+STATE_PREFIX=alchemist
 
 REPOS=(
   autumngarage/alchemist
@@ -36,10 +36,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
-      shift
-      ;;
-    --dispatch-only)
-      INCLUDE_TEST_LABELS=0
       shift
       ;;
     --repos)
@@ -85,71 +81,44 @@ run_or_print() {
   "$@"
 }
 
-transition_label() {
-  local prefix="$1"
-  local state="$2"
-
-  case "$state" in
-    dispatch)
-      printf '%s' "$prefix"
-      ;;
-    working)
-      printf '%s' "${prefix/-dispatch/-working}" | sed 's/-test$/-test-working/'
-      ;;
-    shipped)
-      printf '%s' "${prefix/-dispatch/-shipped}" | sed 's/-test$/-test-shipped/'
-      ;;
-    declined)
-      printf '%s' "${prefix/-dispatch/-declined}" | sed 's/-test$/-test-declined/'
-      ;;
-    error)
-      printf '%s' "${prefix/-dispatch/-error}" | sed 's/-test$/-test-error/'
-      ;;
-    *)
-      echo "ERROR: unknown label state '$state'" >&2
-      return 1
-      ;;
-  esac
-}
-
 ensure_prefix() {
   local repo="$1"
   local prefix="$2"
-  local name
 
-  name="$(transition_label "$prefix" dispatch)"
-  run_or_print gh label create "$name" \
+  run_or_print gh label create "$INTAKE_LABEL" \
     --repo "$repo" \
     --color ffd787 \
-    --description "Dispatched to Alchemist for transmutation" \
+    --description "Eligible for Alchemist agent dispatch" \
     --force
 
-  name="$(transition_label "$prefix" working)"
-  run_or_print gh label create "$name" \
+  run_or_print gh label create "$prefix-dispatched" \
     --repo "$repo" \
     --color fff5d7 \
-    --description "Alchemist actively working" \
+    --description "Alchemist dispatched issue to external agent" \
     --force
 
-  name="$(transition_label "$prefix" shipped)"
-  run_or_print gh label create "$name" \
+  run_or_print gh label create "$prefix-pr-open" \
+    --repo "$repo" \
+    --color d7f0ff \
+    --description "Alchemist found an agent PR and is watching it" \
+    --force
+
+  run_or_print gh label create "$prefix-shipped" \
     --repo "$repo" \
     --color d7ffd7 \
-    --description "Alchemist shipped a PR" \
+    --description "Alchemist saw the PR merge" \
     --force
 
-  name="$(transition_label "$prefix" declined)"
-  run_or_print gh label create "$name" \
+  run_or_print gh label create "$prefix-blocked" \
     --repo "$repo" \
-    --color d7d7ff \
-    --description "Alchemist reviewed and declined to make changes" \
+    --color cfd7ff \
+    --description "Alchemist blocked for human triage" \
     --force
 
-  name="$(transition_label "$prefix" error)"
-  run_or_print gh label create "$name" \
+  run_or_print gh label create "$prefix-error" \
     --repo "$repo" \
     --color ffd7d7 \
-    --description "Alchemist hit an error" \
+    --description "Alchemist coordinator error" \
     --force
 }
 
@@ -166,10 +135,7 @@ for repo in "${REPOS[@]}"; do
   [ -n "$repo" ] || continue
 
   echo "==> $repo"
-  ensure_prefix "$repo" alchemist-dispatch
-  if [ "$INCLUDE_TEST_LABELS" -eq 1 ]; then
-    ensure_prefix "$repo" alchemist-test
-  fi
+  ensure_prefix "$repo" "$STATE_PREFIX"
 done
 
 echo "==> Done"

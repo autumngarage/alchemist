@@ -1,16 +1,15 @@
 [project]
 name = "alchemist"
 dynamic = ["version"]
-description = "Issue-driven transmuter for the Autumn Garage family. Open issue in, reviewed PR out."
+description = "Issue dispatcher and PR babysitter for external coding agents."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Henry Modisett" }]
-keywords = ["github", "issues", "automation", "agent", "autumngarage", "conductor", "touchstone"]
+keywords = ["github", "issues", "automation", "agent", "autumngarage", "codex", "devin"]
 
 dependencies = [
     "click>=8.1.0",
-    "jinja2>=3.1.0",
     "pyjwt[crypto]>=2.8.0",
     "rich>=13.9.0",
 ]
@@ -57,7 +56,7 @@ module = "alchemist._version"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["jinja2", "jinja2.*", "jwt", "jwt.*"]
+module = ["jwt", "jwt.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

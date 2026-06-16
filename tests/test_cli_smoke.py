@@ -179,9 +179,7 @@ def test_run_once_text_with_no_work(monkeypatch: pytest.MonkeyPatch, tmp_path):
 def test_run_once_exits_zero_when_all_errors_are_benign(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    """LLM-decline ('no diff') and lock-busy are non-fatal — should not flag the
-    Railway deploy as CRASHED. Only real tool errors (timeout, exit) should.
-    """
+    """Issue-level waiting/lock states are non-fatal for cron."""
     from alchemist.runner import RunResult
 
     monkeypatch.setenv("ALCHEMIST_STATE_DIR", str(tmp_path / "state"))
@@ -192,9 +190,10 @@ def test_run_once_exits_zero_when_all_errors_are_benign(
             issue_number=1,
             pr_url=None,
             merged=None,
-            error="conductor produced no diff",
+            error=None,
             elapsed_sec=0.1,
             dry_run=True,
+            status="waiting",
         ),
         RunResult(
             repo="autumngarage/cortex",
@@ -204,6 +203,7 @@ def test_run_once_exits_zero_when_all_errors_are_benign(
             error="lock-busy: /var/.../locks/autumngarage-cortex.lock",
             elapsed_sec=0.0,
             dry_run=True,
+            status="lock-busy",
         ),
     ]
     monkeypatch.setattr("alchemist.runner.run_tick", lambda config: benign)
@@ -226,9 +226,10 @@ def test_run_once_exits_zero_when_issue_level_tool_error(
             issue_number=1,
             pr_url=None,
             merged=None,
-            error="conductor: timeout after 600s",
+            error="agent dispatch failed",
             elapsed_sec=600.0,
             dry_run=False,
+            status="error",
         )
     ]
     monkeypatch.setattr("alchemist.runner.run_tick", lambda config: handled)
@@ -254,6 +255,7 @@ def test_run_once_exits_one_when_run_level_error(
             error="doctor: github auth: missing",
             elapsed_sec=0.0,
             dry_run=False,
+            status="fatal",
         )
     ]
     monkeypatch.setattr("alchemist.runner.run_tick", lambda config: fatal)

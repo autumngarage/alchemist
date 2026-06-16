@@ -27,18 +27,19 @@ class Config:
     """
 
     org: str
-    dispatch_label: str
-    default_provider: str
-    default_budget: str
+    intake_label: str
+    state_label_prefix: str
+    agent_provider: str
     poll_interval_minutes: int
     state_dir: Path
     dry_run: bool
-    max_issues_per_tick: int     # global issue cap across sweep + normal dispatch
-    max_per_repo_per_tick: int   # how many issues to take from any one repo per tick
-    max_concurrent_repos: int     # how many repos to fan out across in parallel
-    conductor_effort: str
-    conductor_timeout_sec: int
-    review_timeout_sec: int
+    max_issues_per_tick: int  # global issue cap per scheduler tick
+    max_per_repo_per_tick: int  # how many issues to take from any one repo per tick
+    max_concurrent_repos: int  # how many repos to fan out across in parallel
+    agent_stale_after_hours: int
+    auto_merge: bool
+    devin_api_key_env: str
+    devin_org_id: str
     github_token_env: str
     assignee_user: str  # GitHub username/login to assign to claimed issues
     repo_blocklist: tuple[str, ...]  # repos in the org to skip during intake
@@ -83,11 +84,9 @@ class Config:
 
 _DEFAULTS: dict[str, object] = {
     "org": "autumngarage",
-    "dispatch_label": "alchemist",
-    # Let Conductor own provider routing by default. Operators can still pin a
-    # concrete provider with ALCHEMIST_PROVIDER=openrouter/codex/claude/etc.
-    "default_provider": "auto",
-    "default_budget": "$2",
+    "intake_label": "agent-ready",
+    "state_label_prefix": "alchemist",
+    "agent_provider": "codex",
     "poll_interval_minutes": 5,
     "state_dir": "/var/alchemist/state",
     "dry_run": True,
@@ -97,19 +96,11 @@ _DEFAULTS: dict[str, object] = {
     "max_issues_per_tick": 1,
     "max_per_repo_per_tick": 1,
     "max_concurrent_repos": 1,
-    # Default to medium so small retries still have enough worker-loop headroom
-    # to reach validation/PR handoff in unattended cron.
-    "conductor_effort": "medium",
-    "conductor_timeout_sec": 600,
-    # 15 minutes for touchstone's merge-pr.sh — it runs the AI code review
-    # (which itself can take 1-3 min for substantive diffs) plus the squash-
-    # merge + cleanup. Empirically, 300s sometimes timed out *after* the
-    # merge succeeded, leading alchemist to report merged=False when the
-    # actual outcome was a clean merge. See alchemist#22 for the post-
-    # timeout state-recheck improvement.
-    "review_timeout_sec": 900,
+    "agent_stale_after_hours": 24,
+    "auto_merge": False,
+    "devin_api_key_env": "DEVIN_API_KEY",
+    "devin_org_id": "",
     "github_token_env": "GITHUB_TOKEN",
-    # PAT owner for v0.1; swap to autumn-alchemist[bot] in v0.2 (alchemist#6).
     "assignee_user": "@me",
     # Comma-separated repo names ("owner/name" or just "name" within the
     # configured org) to skip even when they have eligible open issues. For
@@ -139,15 +130,11 @@ def _coerce_int(raw: object) -> int:
     return int(str(raw).strip())
 
 
-def _coerce_effort(raw: object) -> str:
-    effort = str(raw).strip().lower()
-    allowed = {"minimal", "low", "medium", "high", "max"}
-    if effort in allowed or effort.isdigit():
-        return effort
-    raise ValueError(
-        "conductor_effort must be one of minimal, low, medium, high, max, "
-        "or an integer token budget"
-    )
+def _coerce_agent_provider(raw: object) -> str:
+    provider = str(raw).strip().lower()
+    if provider in {"codex", "devin"}:
+        return provider
+    raise ValueError("agent_provider must be one of codex or devin")
 
 
 def _coerce_repo_blocklist(raw: object, org: str) -> tuple[str, ...]:
@@ -161,13 +148,8 @@ def _coerce_repo_blocklist(raw: object, org: str) -> tuple[str, ...]:
     if isinstance(raw, (list, tuple)):
         names = [str(item).strip() for item in raw if str(item).strip()]
     else:
-        names = [
-            piece.strip() for piece in str(raw).split(",") if piece.strip()
-        ]
-    qualified = tuple(
-        name if "/" in name else f"{org}/{name}"
-        for name in names
-    )
+        names = [piece.strip() for piece in str(raw).split(",") if piece.strip()]
+    qualified = tuple(name if "/" in name else f"{org}/{name}" for name in names)
     return qualified
 
 
@@ -208,18 +190,21 @@ def load_config() -> Config:
 
     env_overrides: dict[str, str] = {
         "ALCHEMIST_ORG": "org",
-        "ALCHEMIST_LABEL": "dispatch_label",
-        "ALCHEMIST_PROVIDER": "default_provider",
-        "ALCHEMIST_BUDGET": "default_budget",
+        "ALCHEMIST_INTAKE_LABEL": "intake_label",
+        "ALCHEMIST_LABEL": "state_label_prefix",
+        "ALCHEMIST_STATE_LABEL_PREFIX": "state_label_prefix",
+        "ALCHEMIST_PROVIDER": "agent_provider",
+        "ALCHEMIST_AGENT_PROVIDER": "agent_provider",
         "ALCHEMIST_POLL_INTERVAL_MINUTES": "poll_interval_minutes",
         "ALCHEMIST_STATE_DIR": "state_dir",
         "ALCHEMIST_DRY_RUN": "dry_run",
         "ALCHEMIST_MAX_ISSUES_PER_TICK": "max_issues_per_tick",
         "ALCHEMIST_MAX_PER_REPO_PER_TICK": "max_per_repo_per_tick",
         "ALCHEMIST_MAX_CONCURRENT_REPOS": "max_concurrent_repos",
-        "ALCHEMIST_CONDUCTOR_EFFORT": "conductor_effort",
-        "ALCHEMIST_CONDUCTOR_TIMEOUT_SEC": "conductor_timeout_sec",
-        "ALCHEMIST_REVIEW_TIMEOUT_SEC": "review_timeout_sec",
+        "ALCHEMIST_AGENT_STALE_AFTER_HOURS": "agent_stale_after_hours",
+        "ALCHEMIST_AUTO_MERGE": "auto_merge",
+        "ALCHEMIST_DEVIN_API_KEY_ENV": "devin_api_key_env",
+        "ALCHEMIST_DEVIN_ORG_ID": "devin_org_id",
         "ALCHEMIST_GITHUB_TOKEN_ENV": "github_token_env",
         "ALCHEMIST_ASSIGNEE": "assignee_user",
         "ALCHEMIST_REPO_BLOCKLIST": "repo_blocklist",
@@ -234,23 +219,22 @@ def load_config() -> Config:
 
     return Config(
         org=str(merged["org"]),
-        dispatch_label=str(merged["dispatch_label"]),
-        default_provider=str(merged["default_provider"]),
-        default_budget=str(merged["default_budget"]),
+        intake_label=str(merged["intake_label"]),
+        state_label_prefix=str(merged["state_label_prefix"]),
+        agent_provider=_coerce_agent_provider(merged["agent_provider"]),
         poll_interval_minutes=_coerce_int(merged["poll_interval_minutes"]),
         state_dir=Path(str(merged["state_dir"])),
         dry_run=_coerce_bool(merged["dry_run"]),
         max_issues_per_tick=_coerce_int(merged["max_issues_per_tick"]),
         max_per_repo_per_tick=_coerce_int(merged["max_per_repo_per_tick"]),
         max_concurrent_repos=_coerce_int(merged["max_concurrent_repos"]),
-        conductor_effort=_coerce_effort(merged["conductor_effort"]),
-        conductor_timeout_sec=_coerce_int(merged["conductor_timeout_sec"]),
-        review_timeout_sec=_coerce_int(merged["review_timeout_sec"]),
+        agent_stale_after_hours=_coerce_int(merged["agent_stale_after_hours"]),
+        auto_merge=_coerce_bool(merged["auto_merge"]),
+        devin_api_key_env=str(merged["devin_api_key_env"]),
+        devin_org_id=str(merged["devin_org_id"]).strip(),
         github_token_env=str(merged["github_token_env"]),
         assignee_user=str(merged["assignee_user"]),
-        repo_blocklist=_coerce_repo_blocklist(
-            merged["repo_blocklist"], str(merged["org"])
-        ),
+        repo_blocklist=_coerce_repo_blocklist(merged["repo_blocklist"], str(merged["org"])),
         app_id=str(merged["app_id"]).strip() or None,
         app_installation_id=str(merged["app_installation_id"]).strip() or None,
         app_private_key=str(merged["app_private_key"]) or None,
