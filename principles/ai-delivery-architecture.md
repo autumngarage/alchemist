@@ -32,31 +32,28 @@ Open PR
   |
   | push feature branch
   | create GitHub PR
-  | cheap push hooks only
-  | no required LLM review here
+  | configured checks/reviews attach to the PR when enabled
   v
-Merge Gate
+Agentic PR Review Loop
   |
-  | 1. Deterministic preflight
-  |    - format/lint/static checks
-  |    - non-LLM tests
-  |
-  v
-Conductor LLM Review / Fix Loop
-  |
-  | 2. LLM review happens only through Conductor
-  |    - Conductor reviews the PR diff against base
-  |    - Conductor may apply safe auto-fixes when allowed
-  |    - fixes are committed to the PR branch
-  |    - loop until Conductor returns CLEAN or BLOCKED
+  | Driver AI watches the PR
+  | - check status and CI/check runs
+  | - review PR comments and requested changes
+  | - address actionable feedback with commits
+  | - push updates that retrigger reviews/checks
   |
   v
-Post-Fix Deterministic Gate
+Approval Gate
   |
-  | 3. If Conductor changed HEAD:
-  |      run deterministic checks again on the new HEAD
-  |    Else:
-  |      reuse the preflight result for the unchanged HEAD
+  | Required reviews approved
+  | Blocking comments resolved
+  | Required checks green
+  |
+  v
+Final Verification
+  |
+  | merge helper may run deterministic checks and
+  | Conductor review/fix backstop for the final head
   v
 Merge PR
   |
@@ -72,12 +69,13 @@ Human user
 ## Required Invariants
 
 - Every change reaches `main` through a GitHub PR unless the documented emergency path is used.
+- PR creation is not completion. The driver stays responsible until the PR is approved, merged, and synced locally.
 - The exact commit merged has passed deterministic checks after its last mutation.
-- The exact commit merged has passed Conductor review after its last mutation.
-- LLM review uses Conductor as the only model access path. Driver CLIs do not call provider-specific review commands directly.
-- PR creation is not the expensive gate. It should be fast enough to create reviewable work early.
+- The exact commit merged has no unresolved blocking review comments, requested changes, or failing required checks.
+- Touchstone-managed LLM review uses Conductor as the only model access path. Driver CLIs do not call provider-specific review commands directly.
+- PR creation is the review coordination surface. It should happen early enough for CI and any PR-visible agentic reviewers to work against visible PR state.
 - Feature-branch push is not the expensive gate. It should preserve cheap local guardrails without running full test suites or LLM review by default.
-- Merge is the expensive gate. It is the one place where required deterministic checks and required Conductor review run.
+- Merge is allowed only after PR-visible review and check approval. The local merge helper gates on requested-changes review decisions and unresolved review threads before and after Conductor review, then runs deterministic checks and Conductor review as a backstop.
 - A deterministic check result may be reused only when the cache key includes the base ref, head commit, relevant config, and checker version/input boundary.
 
 ## Driver AI Responsibilities
@@ -90,7 +88,9 @@ The driver AI is Claude Code, Codex, Gemini CLI, or another AGENTS.md-native cod
 - stage explicit file paths
 - commit coherent changes
 - open the PR
-- invoke the merge gate
+- watch PR comments, review decisions, and check status
+- address actionable PR feedback with commits
+- invoke final merge automation only after approval
 - explain the outcome to the user
 
 The driver may use Conductor for bounded implementation, research, or review work, but Conductor does not own the branch-to-merge lifecycle.
@@ -99,10 +99,10 @@ The driver may use Conductor for bounded implementation, research, or review wor
 
 Conductor is the LLM router for review and delegated model work.
 
-- Required LLM review runs through Conductor at the merge gate.
+- Touchstone-managed LLM review runs through Conductor, whether invoked by PR automation, an advisory review command, or a final merge backstop.
 - Conductor chooses the configured provider/model and handles provider fallback.
 - Conductor may apply safe fixes only when the review mode and path policy allow it.
-- Conductor findings are either fixed and committed on the PR branch, or block the merge.
+- Conductor findings should surface on the PR when possible. They are either fixed and committed on the PR branch, or block the merge.
 
 Provider-specific commands such as direct Claude/Codex/Gemini review invocations are not part of the required review architecture.
 
@@ -125,7 +125,7 @@ Driver AI integration
   |
   | integrates candidate changes into the primary PR branch
   | resolves conflicts
-  | owns final checks, PR, merge gate, and cleanup
+  | owns PR review loop, final checks, merge, and cleanup
 ```
 
 Rules:
@@ -134,20 +134,17 @@ Rules:
 - Give every worker a bounded task and explicit file ownership.
 - Workers must not edit outside their assigned scope.
 - Workers must not revert or overwrite another worker's work.
-- Workers may produce candidate changes; only the driver integrates them into the PR that enters the merge gate.
+- Workers may produce candidate changes; only the driver integrates them into the PR that enters the review loop.
 - No worker opens or merges the final PR unless the driver explicitly assigns that role.
 - Clean up worktrees after merge or abandonment.
 
 ## Implementation Scope
 
-The streamlined build should make the scripts match this architecture:
+The scripts now enforce the core merge-time parts of this architecture:
 
-1. `open-pr.sh` creates PRs cheaply. With `--auto-merge`, it should not run PR-open advisory Conductor review.
-2. Feature-branch pre-push should keep cheap guardrails only. Full validation belongs to the merge gate.
-3. `merge-pr.sh` owns the required pipeline:
-   - deterministic preflight for the PR base/head
-   - Conductor review/fix loop
-   - deterministic postflight only if the review loop changed HEAD
-   - squash merge after both invariants hold
-4. Review and preflight markers should key on base/head/config so repeated operations reuse valid results without hiding stale state.
-5. Docs, templates, tests, and issue guidance should describe this merge-gate architecture consistently.
+1. `open-pr.sh` creates or updates the PR and is the default driver entry point for shipping.
+2. Creating or updating the PR should expose configured checks and, when enabled, PR-visible agentic reviewers.
+3. The driver watches PR comments, review decisions, and checks after each push; actionable feedback becomes commits on the PR branch.
+4. `merge-pr.sh` blocks draft PRs, active requested-changes decisions, unresolved review threads, and thread-state inspection failures before the final squash merge.
+5. Review and preflight markers should key on base/head/config so repeated operations reuse valid results without hiding stale state.
+6. Docs, templates, tests, and issue guidance should describe the PR-visible review loop consistently.

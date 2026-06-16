@@ -40,7 +40,7 @@ Search before filing: `gh issue list --search "<keywords>"`. If a matching issue
 
 If you hit what looks like a bug in an autumngarage tool — actual unexpected behavior in the tool itself, not your project's misuse of it — file the issue **upstream against the tool's repo**, not against your project. The same bug will bite the next user; logging it in the tool's repo is how the ecosystem stays sharp.
 
-This also applies to **workflow friction** caused by the tools, even when it is not a hard crash: excessive token use, poor parallelization, unclear delegation ergonomics, brittle merge-gate behavior, or other agent-delivery inefficiency. If the pain repeats, it is an upstream product issue.
+This also applies to **workflow friction** caused by the tools, even when it is not a hard crash: excessive token use, poor parallelization, unclear delegation ergonomics, brittle review/merge behavior, or other agent-delivery inefficiency. If the pain repeats, it is an upstream product issue.
 
 The repos:
 

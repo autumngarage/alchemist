@@ -9,11 +9,13 @@
 #
 # What this does:
 #   1. Verifies the PR is open and mergeable.
-#   2. Runs AI code review as a merge gate.
-#   3. Squash-merges and deletes the remote branch.
-#   4. Checks out/syncs the default branch where the local topology permits.
-#   5. Deletes the verified-merged local feature branch when safe.
-#   6. Removes the merged feature worktree when safe.
+#   2. Verifies PR-visible feedback has no blocking review state.
+#   3. Runs AI code review as a merge gate.
+#   4. Re-checks PR-visible feedback on the reviewed head.
+#   5. Squash-merges and deletes the remote branch.
+#   6. Checks out/syncs the default branch where the local topology permits.
+#   7. Deletes the verified-merged local feature branch when safe.
+#   8. Removes the merged feature worktree when safe.
 #
 # Exit codes:
 #   0 — merged cleanly
@@ -66,6 +68,9 @@ PREFLIGHT_CACHE_KEY=""
 PREFLIGHT_CACHE_FILE=""
 PREFLIGHT_CACHE_INPUTS=""
 PR_WORKTREE_PATH=""
+REPO_FULL_NAME=""
+REPO_OWNER=""
+REPO_NAME=""
 TOUCHSTONE_REVIEW_LOG="${TOUCHSTONE_REVIEW_LOG-${HOME:-}/.touchstone-review-log}"
 TOUCHSTONE_REVIEW_LOG_MAX_LINES="${TOUCHSTONE_REVIEW_LOG_MAX_LINES:-1000}"
 TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS="${TOUCHSTONE_FAIL_OPEN_BYPASS_WINDOW_HOURS:-24}"
@@ -287,6 +292,11 @@ fi
 
 # Resolve the default branch.
 DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)"
+REPO_FULL_NAME="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)"
+if [ -n "$REPO_FULL_NAME" ] && [ "$REPO_FULL_NAME" != "${REPO_FULL_NAME#*/}" ]; then
+  REPO_OWNER="${REPO_FULL_NAME%%/*}"
+  REPO_NAME="${REPO_FULL_NAME#*/}"
+fi
 
 truthy() {
   case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
@@ -484,6 +494,11 @@ preflight_tool_fingerprint() {
 }
 
 preflight_env_fingerprint() {
+  local dogfood_resolved_command=""
+
+  if declare -F touchstone_preflight_dogfood_command >/dev/null 2>&1; then
+    dogfood_resolved_command="$(touchstone_preflight_dogfood_command || true)"
+  fi
   {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SCRIPT:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_COMMAND:-}"
@@ -491,6 +506,9 @@ preflight_env_fingerprint() {
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_AFFECTED_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_SMOKE_COMMAND:-}"
     printf 'TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_VALIDATE_FULL_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND=%s\n' "${TOUCHSTONE_PREFLIGHT_DOGFOOD_COMMAND:-}"
+    printf 'TOUCHSTONE_PREFLIGHT_DOGFOOD_RESOLVED_COMMAND=%s\n' "$dogfood_resolved_command"
+    printf 'TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD=%s\n' "${TOUCHSTONE_PREFLIGHT_SKIP_DOGFOOD:-}"
   } | preflight_hash_stream
 }
 
@@ -508,7 +526,8 @@ preflight_cache_inputs() {
   checker_hash="$(preflight_hash_file_list \
     "lib/preflight.sh" "$PREFLIGHT_SCRIPT" \
     "lib/preflight-scope.sh" "$(dirname "$PREFLIGHT_SCRIPT")/preflight-scope.sh" \
-    "scripts/touchstone-run.sh" "$SCRIPT_DIR/touchstone-run.sh")"
+    "scripts/touchstone-run.sh" "$SCRIPT_DIR/touchstone-run.sh" \
+    "scripts/conductor-dogfood-smoke.py" "$SCRIPT_DIR/conductor-dogfood-smoke.py")"
   config_hash="$(preflight_hash_paths "$repo_root" \
     ".touchstone-review.toml" \
     ".codex-review.toml" \
@@ -918,7 +937,7 @@ cleanup_local_pr_branch_after_merge() {
   fi
 
   echo "==> Deleting local branch '$branch' after verified squash merge of $reviewed_head ..."
-  if git branch -D "$branch"; then
+  if git branch -D -- "$branch"; then
     echo "==> Local branch '$branch' deleted."
   else
     echo "WARNING: Could not delete local branch '$branch' after verified merge." >&2
@@ -1189,6 +1208,159 @@ failed_checks() {
     --json name,bucket,state,link \
     --template '{{range .}}{{if eq .bucket "fail"}}{{.name}}{{"\t"}}{{.state}}{{"\t"}}{{.link}}{{"\n"}}{{end}}{{end}}' \
     2>/dev/null || true
+}
+
+unresolved_review_threads() {
+  local query
+
+  [ -n "$REPO_OWNER" ] || return 2
+  [ -n "$REPO_NAME" ] || return 2
+
+  query='
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          startLine
+          comments(last: 1) {
+            nodes {
+              author { login }
+              body
+              url
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}'
+
+  gh api graphql --paginate \
+    -F owner="$REPO_OWNER" \
+    -F name="$REPO_NAME" \
+    -F number="$PR_NUMBER" \
+    -f query="$query" \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | [.id, .path, ((.line // .startLine // "") | tostring), (.isOutdated | tostring), (.comments.nodes[0].author.login // ""), (.comments.nodes[0].url // ""), ((.comments.nodes[0].body // "") | gsub("[\r\n\t]"; " ") | .[0:240])] | @tsv'
+}
+
+print_unresolved_review_threads() {
+  local threads="$1"
+  local count=0
+  local id path line outdated author url body
+
+  while IFS="$(printf '\t')" read -r id path line outdated author url body || [ -n "$id" ]; do
+    [ -n "$id" ] || continue
+    count=$((count + 1))
+    if [ -n "$line" ]; then
+      printf '       - %s:%s' "${path:-<unknown>}" "$line" >&2
+    else
+      printf '       - %s' "${path:-<unknown>}" >&2
+    fi
+    [ -n "$author" ] && printf ' by @%s' "$author" >&2
+    [ "$outdated" = "true" ] && printf ' (outdated)' >&2
+    printf '\n' >&2
+    [ -n "$url" ] && printf '         %s\n' "$url" >&2
+    [ -n "$body" ] && printf '         %s\n' "$body" >&2
+  done <<<"$threads"
+
+  return "$count"
+}
+
+require_pr_feedback_clear() {
+  local phase="$1"
+  local expected_head="${2:-}"
+  local is_draft review_decision observed_head threads thread_count
+
+  echo "==> Checking PR-visible review feedback for PR #$PR_NUMBER ($phase) ..."
+
+  if ! is_draft="$(gh pr view "$PR_NUMBER" --json isDraft --jq '.isDraft' 2>&1)"; then
+    echo "ERROR: Could not inspect draft state for PR #$PR_NUMBER: $is_draft" >&2
+    echo "       Refusing to merge without draft-state confirmation." >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+    exit 1
+  fi
+  if [ -z "$is_draft" ]; then
+    echo "ERROR: GitHub returned an empty draft state for PR #$PR_NUMBER." >&2
+    echo "       Refusing to merge without draft-state confirmation." >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+    exit 1
+  fi
+  if [ "$is_draft" = "true" ]; then
+    echo "ERROR: PR #$PR_NUMBER is still a draft; refusing to merge." >&2
+    echo "       Mark it ready for review, then rerun: bash scripts/open-pr.sh --auto-merge" >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-blocked"
+    exit 1
+  fi
+
+  if [ -n "$expected_head" ]; then
+    if ! observed_head="$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' 2>&1)"; then
+      echo "ERROR: Could not inspect PR #$PR_NUMBER head commit: $observed_head" >&2
+      echo "       Refusing to merge without exact-head confirmation." >&2
+      TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+      exit 1
+    fi
+    if [ -z "$observed_head" ]; then
+      echo "ERROR: GitHub returned an empty head commit for PR #$PR_NUMBER." >&2
+      echo "       Refusing to merge without exact-head confirmation." >&2
+      TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+      exit 1
+    fi
+    if [ "$observed_head" != "$expected_head" ]; then
+      echo "ERROR: PR #$PR_NUMBER head changed while checking review feedback." >&2
+      echo "       expected: $expected_head" >&2
+      echo "       actual:   $observed_head" >&2
+      echo "       Rerun the merge gate on the current head." >&2
+      TOUCHSTONE_MERGE_FAILURE_REASON="head-not-updated"
+      exit 1
+    fi
+  fi
+
+  if ! review_decision="$(gh pr view "$PR_NUMBER" --json reviewDecision --jq '.reviewDecision // empty' 2>&1)"; then
+    echo "ERROR: Could not inspect review decision for PR #$PR_NUMBER: $review_decision" >&2
+    echo "       Refusing to merge without review-decision confirmation." >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+    exit 1
+  fi
+  if [ "$review_decision" = "CHANGES_REQUESTED" ]; then
+    echo "ERROR: PR #$PR_NUMBER has an active CHANGES_REQUESTED review decision." >&2
+    echo "       Address the requested changes, push fixes, and rerun: bash scripts/open-pr.sh --auto-merge" >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-blocked"
+    exit 1
+  fi
+
+  threads="$(unresolved_review_threads)" || {
+    echo "ERROR: Could not inspect PR #$PR_NUMBER review threads via GitHub GraphQL." >&2
+    if [ -z "$REPO_OWNER" ] || [ -z "$REPO_NAME" ]; then
+      echo "       Repository name could not be resolved from 'gh repo view --json nameWithOwner'." >&2
+    fi
+    echo "       Refusing to merge without thread-level review state." >&2
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-state"
+    exit 1
+  }
+
+  if [ -n "$threads" ]; then
+    echo "ERROR: PR #$PR_NUMBER has unresolved review thread(s)." >&2
+    print_unresolved_review_threads "$threads" || thread_count="$?"
+    thread_count="${thread_count:-0}"
+    echo "       Resolve or explicitly answer every actionable thread, then rerun: bash scripts/open-pr.sh --auto-merge" >&2
+    if [ "$thread_count" -gt 100 ]; then
+      echo "       Listed first page(s) reported by GitHub; inspect the PR for the complete thread list." >&2
+    fi
+    TOUCHSTONE_MERGE_FAILURE_REASON="pr-feedback-blocked"
+    exit 1
+  fi
+
+  echo "==> PR-visible review feedback clear."
 }
 
 print_failed_checks_and_exit() {
@@ -1591,10 +1763,17 @@ fi
 # 2. Check mergeability with retries (GitHub's status can lag after a push).
 wait_for_clean_merge_state
 
-# 3. Run AI review as the merge gate.
+# 3. Block on PR-visible requested changes or unresolved review threads before
+# spending model-review tokens.
+require_pr_feedback_clear "before merge review"
+
+# 4. Run AI review as the merge gate.
 run_merge_review
 
-# 4. Squash-merge and delete the branch.
+# 5. Re-check PR-visible feedback on the exact reviewed head before merging.
+require_pr_feedback_clear "after merge review" "$REVIEWED_HEAD_OID"
+
+# 6. Squash-merge and delete the branch.
 echo "==> Squash-merging PR #$PR_NUMBER ..."
 if [ -z "$REVIEWED_HEAD_OID" ]; then
   echo "ERROR: Cannot merge PR #$PR_NUMBER because no reviewed head commit was recorded." >&2

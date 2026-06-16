@@ -1,6 +1,6 @@
 # Git Workflow
 
-Normal code changes go through a feature branch + PR + merge. Emergency bypasses are allowed only through the documented emergency path below, and must be disclosed in the next recovery PR. This discipline catches bugs before they land on the default branch and creates an audit trail for every change, while leaving a legible escape hatch for production incidents.
+Normal code changes go through a feature branch + PR + PR-visible review loop + merge. Emergency bypasses are allowed only through the documented emergency path below, and must be disclosed in the next recovery PR. This discipline catches bugs before they land on the default branch and creates an audit trail for every change, while leaving a legible escape hatch for production incidents.
 
 ## Never commit on the default branch
 
@@ -28,7 +28,7 @@ The three layers are complementary — the local hook catches the honest mistake
 2. **Branch — before any edit that might become a commit.** `git checkout -b <type>/<short-description>` where `<type>` is one of `feat`, `fix`, `chore`, `refactor`, `docs`. Do this as step one of the work, not as a cleanup step later. The check is `git branch --show-current` *before your first edit* — see "Never commit on the default branch" above for why edit time and not commit time.
 3. **Check the tree before changing it.** Run `git status --short` and `git branch --show-current` before starting implementation. If the tree is dirty with unrelated user changes, do not stash them and do not auto-commit on the user's behalf. Ask how to proceed, or branch around the changes when the file surfaces are disjoint. `git stash` is hidden multi-agent state, not a coordination mechanism.
 4. **Loop: change → commit → push.** Each meaningful sub-task gets its own commit and push. Stage explicit file paths (not `git add -A`), write a concise message, push to the open branch. Don't batch a session's worth of changes into one commit at the end — see the "Commit and push frequency" section below.
-5. **Ship.** `scripts/open-pr.sh --auto-merge` pushes, creates the PR, runs the merge-gate pipeline, squash-merges after the gate is clean, deletes the remote branch, and pulls the updated default branch — all in one command. Use `scripts/open-pr.sh` (without `--auto-merge`) if you want to open the PR without merging. The canonical architecture is [AI Delivery Architecture](ai-delivery-architecture.md): deterministic preflight, Conductor LLM review/fix, and deterministic postflight only when the review loop changed HEAD.
+5. **Ship.** `scripts/open-pr.sh --auto-merge` pushes, creates or updates the PR, and drives the project's shipping automation. Opening or updating the PR is the review/check coordination point; PR-visible agentic reviewers run there when configured. The driver watches the PR, addresses actionable comments with commits, pushes updates, and merges only after required reviews and checks are approved. If no PR-visible review appears, continue through the project's final verification instead of waiting. Use `scripts/open-pr.sh` (without `--auto-merge`) if you want to open the PR without merging. The canonical architecture is [AI Delivery Architecture](ai-delivery-architecture.md): PR-visible review loop first, final verification/merge after approval.
 6. **Clean up.** Delete the local feature branch. Run `scripts/cleanup-branches.sh` periodically for batch hygiene.
 
 ### Touchstone CLI auto-sync
@@ -75,9 +75,11 @@ Use `touchstone --no-auto-sync <subcommand>` to disable project auto-sync for on
 - [Trunk-Based Development](https://trunkbaseddevelopment.com/) — the practice that frequent small commits enable at scale (Google, Facebook, et al.).
 - The autumn-garage convention is closer to "tiny PRs to main" than "long-lived feature branches" — short branches, frequent commits, fast review.
 
-## Conductor merge review (optional, recommended)
+## Agentic PR Review Loop
 
-If the project has AI review configured (see `.touchstone-review.toml` for policy and the `conductor-review` hook in `.pre-commit-config.yaml` for the entry point), the required LLM review belongs to the merge gate. Legacy `.codex-review.toml` configs and `codex-review` hooks still work as compatibility names. The hook delegates model access to Conductor, so the reviewer may be Claude, Codex, Gemini, a local model, or another configured provider. Feature-branch pushes should stay cheap; the expensive path is `scripts/open-pr.sh --auto-merge`: open PR → deterministic preflight → Conductor review/fix loop → deterministic postflight when needed → squash-merge → branch deleted. There is no separate required PR-open advisory review in the core architecture.
+If the project has AI review configured (see `.touchstone-review.toml` for policy and the `conductor-review` hook in `.pre-commit-config.yaml` for the entry point), the PR is the review surface. Opening or updating the PR should expose configured checks and PR-visible agentic reviews when enabled. The driving CLI watches the PR, reads comments and requested changes, fixes actionable findings with commits, pushes the branch again, and repeats until all blocking reviews/checks are approved. Legacy `.codex-review.toml` configs and `codex-review` hooks still work as compatibility names.
+
+Touchstone-managed LLM review delegates model access to Conductor, so the reviewer may be Claude, Codex, Gemini, a local model, or another configured provider. Feature-branch pushes should stay cheap. In projects that still use the local merge helper, `scripts/open-pr.sh --auto-merge` runs deterministic preflight, refuses active requested-changes decisions or unresolved review threads, runs Conductor review/fix, re-checks PR feedback on the reviewed head, and runs deterministic postflight as a final backstop before squash merge. Do not run hidden required reviews detached from the PR; findings should surface as PR comments, review threads, check results, or commits.
 
 **AI review is advisory.** It does not replace deterministic checks (lint, tests, type checking). It catches semantic bugs and policy violations that automated tools miss; it does not guarantee correctness.
 
@@ -120,7 +122,7 @@ run in diff mode unless changed `tests/test-*.sh` files can be executed
 directly; use `bash lib/preflight.sh --all-files` for repo-wide audits.
 `TOUCHSTONE_NO_PREFLIGHT=1` remains the emergency escape hatch.
 
-If the reviewer itself wedges after the branch has already recorded a clean review iteration, use `scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>"` instead of dropping to raw `gh pr merge`. The bypass refuses fresh branches, prints a visible warning, comments on the PR with the reason, and adds a `Reviewer-bypass: <reason>` trailer to the squash commit when GitHub accepts the supplied merge body. This is for a stalled reviewer gate on an already-reviewed branch, not for bypassing substantive findings.
+If the reviewer itself wedges after the PR already has a clean review signal, use `scripts/merge-pr.sh <pr-number> --bypass-with-disclosure="<reason>"` instead of dropping to raw `gh pr merge`. The bypass refuses fresh branches, prints a visible warning, comments on the PR with the reason, and adds a `Reviewer-bypass: <reason>` trailer to the squash commit when GitHub accepts the supplied merge body. This is for a stalled reviewer path on an already-reviewed branch, not for bypassing substantive findings.
 
 Prefer a different model or provider for AI review than the one that authored the change, when Conductor has one available. Deterministic checks — format, lint, typecheck, tests, and project-specific validators — still run before AI review; model diversity complements those checks, it does not replace them.
 
@@ -161,7 +163,7 @@ Under the hood this uses the same GitHub API flow (claim + dispatch comment), eq
 
 ```bash
 gh issue edit <n> --add-assignee @me
-gh issue comment <n> --body "Wave N Lane X dispatched. Branch \`<branch>\`, worktree at \`<path>\`. <agent type> implementing. PR will land via \`open-pr.sh --auto-merge\`."
+gh issue comment <n> --body "Wave N Lane X dispatched. Branch \`<branch>\`, worktree at \`<path>\`. <agent type> implementing. PR will land via \`open-pr.sh --auto-merge\` after PR reviews/checks approve."
 ```
 
 Then start the agent. Not after.
@@ -194,7 +196,7 @@ When one lane closes multiple issues (e.g., Wave 1's Lane A bundling shfmt + mar
 Three layers back the convention so a missed claim doesn't reach merge silently:
 
 - **`scripts/claim-issue.sh`** is the canonical claim path. It does the claim + dispatch comment in one step, and detects races (another assignee appeared between the API read and write — back off, exit non-zero so the dispatching agent knows not to spawn a worker). Use it instead of raw `gh issue edit` when an agent is about to start work.
-- **`scripts/open-pr.sh`** runs `scripts/issue-claim-check.sh` locally before creating a new PR and before auto-merging an existing PR. If the PR body closes an open issue that is not assigned to the PR author, it fails before spending merge-gate review time.
+- **`scripts/open-pr.sh`** runs `scripts/issue-claim-check.sh` locally before creating a new PR and before auto-merging an existing PR. If the PR body closes an open issue that is not assigned to the PR author, it fails before spending review time.
 - **`.github/workflows/issue-claim-check.yml`** runs on every `pull_request` open/edit/synchronize. It parses `Closes #N` / `Fixes #N` / `Resolves #N` / `Closes-issue: #N` from the PR body, fetches each open referenced issue, and fails the check if the PR author is not in the issue's assignees. The failure posts a comment on the PR explaining what to fix.
 
 The local check is the fast path: it stops the common mistake before a PR exists or before merge review runs. The CI check is the hard backstop: even if an agent bypasses the local script, a PR that tries to close an unclaimed issue fails its checks and won't auto-merge.

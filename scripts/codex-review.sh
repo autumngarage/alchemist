@@ -39,6 +39,7 @@
 #     [review.conductor].tags   = "code-review,..."
 #     [review.conductor].with   = "<provider>"  (pins a specific provider)
 #     [review.conductor].exclude = "<p1>,<p2>"  (skips in auto-routing)
+#     [review.conductor].minimum_version = "0.10.29"  (block known-bad binaries)
 #     [review.context].mode     = "auto"|"full"  (auto prunes simple diffs)
 #   See hooks/conductor-review.config.example.toml for the full spec.
 #
@@ -243,20 +244,103 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOUCHSTONE_ROOT="${TOUCHSTONE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-resolve_review_config_file() {
-  local repo_root="$1"
-  if [ -f "$repo_root/.touchstone-review.toml" ]; then
-    printf '%s\n' "$repo_root/.touchstone-review.toml"
-  elif [ -f "$repo_root/.codex-review.toml" ]; then
-    printf '%s\n' "$repo_root/.codex-review.toml"
-  else
-    printf '%s\n' "$repo_root/.touchstone-review.toml"
+# Files materialized from the trusted base ref by resolve_trusted_review_file;
+# removed by cleanup_review_process on exit.
+TRUSTED_REVIEW_TMP_FILES=()
+# Canonical (display) name of the file most recently resolved.
+RESOLVED_REVIEW_FILE_LABEL=""
+
+# Resolve a review control file (config or prompt-context) to a path whose
+# CONTENT is trusted, given an ordered list of candidate repo-relative paths.
+#
+# In the merge gate the working tree is the *attacker-controlled PR head*
+# (scripts/merge-pr.sh checks it out before invoking this hook), so reading the
+# review config or prompt-context file from the working tree would let a PR
+# weaken or disable the very guardrails reviewing it (unsafe_paths,
+# safe_by_default, mode, enabled) or inject "trusted project context" straight
+# into the fix-loop prompt. When CODEX_REVIEW_PR_NUMBER is set we therefore read
+# these files from the trusted base ref (CODEX_REVIEW_BASE) — the committed,
+# already-reviewed policy. A PR that adds or edits one of these files only takes
+# effect once it has merged through the gate under the previous policy.
+#
+# Outside the merge gate (local pre-push review) there is no separate trusted
+# base, so the working tree is the source of truth.
+#
+# Echoes a readable path for the first candidate present in the trusted source
+# and sets RESOLVED_REVIEW_FILE_LABEL to its canonical relative path; echoes
+# nothing if no candidate exists (callers fall back to built-in safe defaults).
+resolve_trusted_review_file() {
+  RESOLVED_REVIEW_FILE_LABEL=""
+  local rel tmp
+  if [ -n "${CODEX_REVIEW_PR_NUMBER:-}" ] && [ -n "${CODEX_REVIEW_BASE:-}" ]; then
+    for rel in "$@"; do
+      if git cat-file -e "${CODEX_REVIEW_BASE}:${rel}" 2>/dev/null; then
+        tmp="$(mktemp -t touchstone-trusted-review.XXXXXX)" || return 0
+        if git show "${CODEX_REVIEW_BASE}:${rel}" >"$tmp" 2>/dev/null; then
+          TRUSTED_REVIEW_TMP_FILES+=("$tmp")
+          RESOLVED_REVIEW_FILE_LABEL="$rel"
+          printf '%s\n' "$tmp"
+          return 0
+        fi
+        rm -f "$tmp"
+      fi
+    done
+    return 0
   fi
+  for rel in "$@"; do
+    if [ -f "$REPO_ROOT/$rel" ]; then
+      RESOLVED_REVIEW_FILE_LABEL="$rel"
+      printf '%s\n' "$REPO_ROOT/$rel"
+      return 0
+    fi
+  done
 }
 
-CONFIG_FILE="$(resolve_review_config_file "$REPO_ROOT")"
-CONFIG_DISPLAY_NAME="$(basename "$CONFIG_FILE")"
+CONFIG_FILE="$(resolve_trusted_review_file .touchstone-review.toml .codex-review.toml)"
+CONFIG_DISPLAY_NAME="$(basename "${RESOLVED_REVIEW_FILE_LABEL:-.touchstone-review.toml}")"
+# No config in the trusted source. Outside the merge gate the working tree IS the
+# source of truth, so fall back to it (an absent file then leaves CONFIG_FILE
+# pointing at a non-existent path, and the `[ -f "$CONFIG_FILE" ]` guard below
+# falls through to built-in safe defaults). Under the merge gate the working tree
+# is the attacker PR head, which may ADD a config that is absent on the base ref;
+# do NOT fall back to it — leave CONFIG_FILE empty so parsing is skipped and the
+# built-in safe defaults apply. (The working-tree fallback here was a bypass: a
+# PR that introduced a brand-new weakened config would have had it honored.)
+if [ -z "$CONFIG_FILE" ] && [ -z "${CODEX_REVIEW_PR_NUMBER:-}" ]; then
+  CONFIG_FILE="$REPO_ROOT/.touchstone-review.toml"
+fi
+
+# Test hook: print the resolved config path/name and exit, so regression tests
+# can assert the gate never resolves config from the attacker PR head.
+if [ "${CODEX_REVIEW_TEST_PRINT_CONFIG:-0}" = "1" ]; then
+  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+  printf 'CONFIG_DISPLAY_NAME=%s\n' "$CONFIG_DISPLAY_NAME"
+  exit 0
+fi
 cd "$REPO_ROOT"
+
+default_conductor_bin() {
+  if [ -f "$REPO_ROOT/pyproject.toml" ] \
+    && [ -f "$REPO_ROOT/src/conductor/cli.py" ] \
+    && grep -q 'name = "conductor"' "$REPO_ROOT/pyproject.toml" 2>/dev/null \
+    && command -v uv >/dev/null 2>&1; then
+    printf 'uv run conductor'
+    return 0
+  fi
+  printf 'conductor'
+}
+
+CONDUCTOR_BIN="${CONDUCTOR_BIN:-$(default_conductor_bin)}"
+read -ra CONDUCTOR_BIN_ARGV <<<"$CONDUCTOR_BIN"
+
+conductor() {
+  command "${CONDUCTOR_BIN_ARGV[@]}" "$@"
+}
+
+conductor_binary_available() {
+  [ "${#CONDUCTOR_BIN_ARGV[@]}" -gt 0 ] || return 1
+  command -v "${CONDUCTOR_BIN_ARGV[0]}" >/dev/null 2>&1
+}
 
 PREFLIGHT_SCRIPT="$TOUCHSTONE_ROOT/lib/preflight.sh"
 if [ -f "$PREFLIGHT_SCRIPT" ]; then
@@ -399,6 +483,7 @@ CONFIG_MODE=""
 REVIEW_ENABLED="${CODEX_REVIEW_ENABLED:-true}"
 PREFLIGHT_REQUIRED=true
 REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-0}"
+REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-}"
 CONDUCTOR_TIMEOUT_GRACE_SEC="${TOUCHSTONE_CONDUCTOR_TIMEOUT_GRACE_SEC:-30}"
 REVIEW_HEARTBEAT_SEC="${TOUCHSTONE_REVIEW_HEARTBEAT_SEC:-60}"
 ON_ERROR="${CODEX_REVIEW_ON_ERROR:-fail-open}"
@@ -425,6 +510,7 @@ CONDUCTOR_EFFORT=""
 CONDUCTOR_TAGS=""
 CONDUCTOR_EXCLUDE=""
 CONDUCTOR_EXCLUDE_CONFIGURED=false
+CONDUCTOR_MINIMUM_VERSION="${TOUCHSTONE_CONDUCTOR_MINIMUM_VERSION:-}"
 CONDUCTOR_PREFLIGHT_REVIEW_PROVIDER=""
 CONDUCTOR_PREFLIGHT_FIX_PROVIDER=""
 ROUTING_ENABLED=true
@@ -873,6 +959,9 @@ if [ -f "$CONFIG_FILE" ]; then
           effort) CONDUCTOR_EFFORT="${CONDUCTOR_EFFORT:-$(toml_unquote "$value")}" ;;
           tags) CONDUCTOR_TAGS="${CONDUCTOR_TAGS:-$(toml_normalize_array "$value")}" ;;
           with) CONDUCTOR_WITH="${CONDUCTOR_WITH:-$(toml_unquote "$value")}" ;;
+          minimum_version | min_version)
+            CONDUCTOR_MINIMUM_VERSION="${CONDUCTOR_MINIMUM_VERSION:-$(toml_unquote "$value")}"
+            ;;
           exclude)
             CONDUCTOR_EXCLUDE="${CONDUCTOR_EXCLUDE:-$(toml_normalize_array "$value")}"
             CONDUCTOR_EXCLUDE_CONFIGURED=true
@@ -981,6 +1070,7 @@ if [ -f "$CONFIG_FILE" ]; then
           safe_by_default) SAFE_BY_DEFAULT="$(normalize_bool "$value")" ;;
           mode) CONFIG_MODE="$(toml_unquote "$value")" ;;
           timeout) REVIEW_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-$value}" ;;
+          max_stall_sec | max_stall_seconds) REVIEW_MAX_STALL_SEC="${CODEX_REVIEW_MAX_STALL_SEC:-$value}" ;;
           on_error) ON_ERROR="${CODEX_REVIEW_ON_ERROR:-$(toml_unquote "$value")}" ;;
           unsafe_paths)
             if [[ "$value" == "["* ]]; then
@@ -1178,13 +1268,11 @@ should_skip_pre_push_review() {
 # Repo-provided review context
 # --------------------------------------------------------------------------
 
-REVIEW_CONTEXT_FILE=""
-for _candidate in "$REPO_ROOT/.codex-review-context.md" "$REPO_ROOT/.github/codex-review-context.md"; do
-  if [ -f "$_candidate" ]; then
-    REVIEW_CONTEXT_FILE="$_candidate"
-    break
-  fi
-done
+# Read the prompt-context file from the trusted base ref under the merge gate
+# (see resolve_trusted_review_file). This file is injected into the review/fix
+# prompt as trusted project guidance, so a PR must not be able to supply it.
+REVIEW_CONTEXT_FILE="$(resolve_trusted_review_file .codex-review-context.md .github/codex-review-context.md)"
+REVIEW_CONTEXT_FILE_LABEL="${RESOLVED_REVIEW_FILE_LABEL:-}"
 
 path_matches_context_pattern() {
   local path="$1"
@@ -1698,7 +1786,7 @@ ASSIST_EOF
 # and lets the router pick.
 
 reviewer_conductor_available() {
-  command -v conductor >/dev/null 2>&1
+  conductor_binary_available
 }
 
 reviewer_conductor_auth_ok() {
@@ -1714,19 +1802,126 @@ reviewer_conductor_auth_ok() {
 }
 
 reviewer_conductor_route_auth_ok() {
-  local route_json provider
+  local route_json provider subcommand
   local -a args
 
   if ! conductor route --help >/dev/null 2>&1; then
     return 1
   fi
 
-  args=(route --json --kind review)
+  subcommand="review"
+  args=(route --json --kind "$subcommand")
   [ -n "${CONDUCTOR_WITH:-}" ] && args+=(--with "$CONDUCTOR_WITH")
   route_json="$(conductor "${args[@]}" 2>/dev/null)" || return 1
   provider="$(conductor_route_json_string_field "$route_json" selected_provider)"
   [ -n "$provider" ] || provider="$(conductor_route_json_string_field "$route_json" provider)"
   [ -n "$provider" ]
+}
+
+conductor_current_version() {
+  local output
+
+  output="$(conductor --version 2>/dev/null || true)"
+  printf '%s\n' "$output" \
+    | sed -nE 's/.*([0-9]+[.][0-9]+[.][0-9]+).*/\1/p' \
+    | head -1
+}
+
+conductor_version_at_least() {
+  local current="$1"
+  local minimum="$2"
+  local current_major current_minor current_patch
+  local minimum_major minimum_minor minimum_patch
+
+  current="${current#v}"
+  minimum="${minimum#v}"
+  current="${current%%[-+]*}"
+  minimum="${minimum%%[-+]*}"
+
+  IFS=. read -r current_major current_minor current_patch <<EOF_VERSION
+$current
+EOF_VERSION
+  IFS=. read -r minimum_major minimum_minor minimum_patch <<EOF_VERSION
+$minimum
+EOF_VERSION
+
+  case "$current_major.$current_minor.$current_patch.$minimum_major.$minimum_minor.$minimum_patch" in
+    *[!0-9.]* | .* | *..* | *.) return 1 ;;
+  esac
+
+  current_minor="${current_minor:-0}"
+  current_patch="${current_patch:-0}"
+  minimum_minor="${minimum_minor:-0}"
+  minimum_patch="${minimum_patch:-0}"
+
+  if [ "$current_major" -gt "$minimum_major" ]; then return 0; fi
+  if [ "$current_major" -lt "$minimum_major" ]; then return 1; fi
+  if [ "$current_minor" -gt "$minimum_minor" ]; then return 0; fi
+  if [ "$current_minor" -lt "$minimum_minor" ]; then return 1; fi
+  [ "$current_patch" -ge "$minimum_patch" ]
+}
+
+conductor_minimum_version_gate_applies() {
+  local reviewer
+
+  [ -n "${CONDUCTOR_MINIMUM_VERSION:-}" ] || return 1
+  [ "${ACTIVE_REVIEWER:-}" = "conductor" ] && return 0
+
+  for reviewer in "${REVIEWER_CASCADE[@]}"; do
+    [ "$reviewer" = "conductor" ] && return 0
+  done
+
+  return 1
+}
+
+write_conductor_minimum_version_summary() {
+  [ -n "${CODEX_REVIEW_SUMMARY_FILE:-}" ] || return 0
+
+  printf '{"reviewer":"Conductor","provider":"unknown","model":"unknown","peer_provider":"none","route":"%s","mode":"%s","context":"%s","prefer":"%s","effort":"%s","files":%d,"diff_lines":%d,"iterations":0,"fix_commits":0,"peer_assists":0,"high_scrutiny_triggered":%s,"high_scrutiny_mode":"%s","high_scrutiny_reason":"","findings":0,"review_status":"review_not_completed","fallback_attempted":false,"fallback_primary_provider":"","fallback_retry_provider":"","fallback_excluded_providers":"","fallback_reason":"","diagnostics_file":"","diagnostics_events":0,"exit_reason":"conductor-version-too-old","elapsed_seconds":0}\n' \
+    "${ROUTING_DECISION:-default}" "${REVIEW_MODE:-fix}" "${PROMPT_CONTEXT_DECISION:-full}" \
+    "${CONDUCTOR_PREFER:-auto}" "${CONDUCTOR_EFFORT:-default}" \
+    "$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null | wc -l | tr -d ' ')" \
+    "${ROUTING_DIFF_LINE_COUNT:-0}" "${HIGH_SCRUTINY_TRIGGERED:-false}" "${HIGH_SCRUTINY_MODE:-peer}" \
+    >"$CODEX_REVIEW_SUMMARY_FILE" 2>/dev/null || true
+}
+
+enforce_conductor_minimum_version() {
+  local current_version
+
+  conductor_minimum_version_gate_applies || return 0
+
+  current_version="$(conductor_current_version)"
+  if [ -n "$current_version" ] \
+    && conductor_version_at_least "$current_version" "$CONDUCTOR_MINIMUM_VERSION"; then
+    return 0
+  fi
+
+  echo "ERROR: Conductor review gate requires conductor >= ${CONDUCTOR_MINIMUM_VERSION}." >&2
+  echo "       installed: ${current_version:-unknown}" >&2
+  echo "       configured by: TOUCHSTONE_CONDUCTOR_MINIMUM_VERSION or [review.conductor].minimum_version" >&2
+  echo "       next action: brew update && brew upgrade autumngarage/conductor/conductor" >&2
+  REVIEW_EXIT_REASON="conductor-version-too-old"
+  REVIEW_FINDINGS_COUNT=0
+  DIFF_LINE_COUNT="$ROUTING_DIFF_LINE_COUNT"
+  if declare -F print_summary >/dev/null 2>&1; then
+    REVIEWER_LABEL="${REVIEWER_LABEL:-Conductor}"
+    FIX_COMMITS="${FIX_COMMITS:-0}"
+    ASSIST_ROUNDS="${ASSIST_ROUNDS:-0}"
+    REVIEW_FILES_INSPECTED="${REVIEW_FILES_INSPECTED:-$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null | wc -l | tr -d ' ')}"
+    REVIEW_FALLBACK_ATTEMPTED="${REVIEW_FALLBACK_ATTEMPTED:-false}"
+    REVIEW_FALLBACK_PRIMARY_PROVIDER="${REVIEW_FALLBACK_PRIMARY_PROVIDER:-}"
+    REVIEW_FALLBACK_RETRY_PROVIDER="${REVIEW_FALLBACK_RETRY_PROVIDER:-}"
+    REVIEW_FALLBACK_EXCLUDED_PROVIDERS="${REVIEW_FALLBACK_EXCLUDED_PROVIDERS:-}"
+    REVIEW_FALLBACK_REASON="${REVIEW_FALLBACK_REASON:-}"
+    REVIEW_DIAGNOSTICS_FILE="${REVIEW_DIAGNOSTICS_FILE:-}"
+    REVIEW_START_TIME="${REVIEW_START_TIME:-$(date +%s)}"
+    print_summary
+  else
+    write_conductor_minimum_version_summary
+  fi
+  log_skip_event "FAIL_CLOSED_CONDUCTOR_VERSION" \
+    "minimum=${CONDUCTOR_MINIMUM_VERSION}:installed=${current_version:-unknown}"
+  exit 1
 }
 
 conductor_inner_timeout() {
@@ -1782,6 +1977,9 @@ reviewer_conductor_exec() {
     args+=(--base "$BASE" --brief-file -)
     if conductor_timeout="$(conductor_inner_timeout "${REVIEW_TIMEOUT:-0}")"; then
       args+=(--timeout "$conductor_timeout")
+    fi
+    if [ -n "${REVIEW_MAX_STALL_SEC:-}" ]; then
+      args+=(--max-stall-seconds "$REVIEW_MAX_STALL_SEC")
     fi
     printf '%s' "$prompt" \
       | CODEX_REVIEW_IN_PROGRESS=1 conductor review "${args[@]}"
@@ -1891,15 +2089,36 @@ conductor_subcommand_for_mode() {
 
 conductor_tools_for_mode() {
   local phase="${1:-review}"
+  local tools
 
   case "$phase:$REVIEW_MODE" in
-    review:diff-only) printf '' ;;
-    review:no-tests) printf 'Read,Grep,Glob' ;;
-    review:*) printf 'Read,Grep,Glob,Bash' ;;
-    fix:no-tests) printf 'Read,Grep,Glob,Edit,Write' ;;
-    fix:*) printf 'Read,Grep,Glob,Bash,Edit,Write' ;;
-    *) printf 'Read,Grep,Glob,Bash' ;;
+    review:diff-only) tools='' ;;
+    review:no-tests) tools='Read,Grep,Glob' ;;
+    review:*) tools='Read,Grep,Glob,Bash' ;;
+    fix:no-tests) tools='Read,Grep,Glob,Edit,Write' ;;
+    fix:*) tools='Read,Grep,Glob,Bash,Edit,Write' ;;
+    *) tools='Read,Grep,Glob,Bash' ;;
   esac
+
+  # Merge-gate hardening: under the merge gate the diff and file contents under
+  # review are attacker-controlled and are a prompt-injection vector into this
+  # tool-enabled loop. Granting Bash there lets injected instructions run
+  # arbitrary commands (exfiltrate secrets, write outside the repo) — side
+  # effects the post-fix unsafe_paths check (a git-diff filter) cannot see. Drop
+  # Bash for PR-gate runs unless explicitly opted in; the deterministic test
+  # gate that runs after Conductor edits still validates behavior.
+  if [ -n "${CODEX_REVIEW_PR_NUMBER:-}" ] \
+    && ! is_truthy "${TOUCHSTONE_REVIEW_ALLOW_GATE_BASH:-false}"; then
+    local filtered="" _t
+    local IFS=','
+    for _t in $tools; do
+      [ "$_t" = "Bash" ] && continue
+      filtered="${filtered:+$filtered,}$_t"
+    done
+    tools="$filtered"
+  fi
+
+  printf '%s' "$tools"
 }
 
 conductor_route_json_string_field() {
@@ -2279,6 +2498,9 @@ REVIEW_LOCK_TOKEN=""
 
 cleanup_review_process() {
   rm -f "$REVIEW_OUTPUT_FILE" "$ASSIST_OUTPUT_FILE" "$REVIEW_STDERR_FILE" "$REVIEW_CONDUCTOR_LOG_FILE"
+  if [ "${#TRUSTED_REVIEW_TMP_FILES[@]}" -gt 0 ]; then
+    rm -f "${TRUSTED_REVIEW_TMP_FILES[@]}" 2>/dev/null || true
+  fi
   rm -f \
     "${SCOPED_LARGE_DIFF_FILE:-}" \
     "${SCOPED_LARGE_DIFF_INCLUDED_PATHS_FILE:-}" \
@@ -2641,6 +2863,11 @@ PROMPT_CONTEXT_CHANGED_PATHS="$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/
 apply_high_scrutiny_policy "$PROMPT_CONTEXT_CHANGED_PATHS"
 apply_review_routing "$ROUTING_DIFF_LINE_COUNT" "$PROMPT_CONTEXT_CHANGED_PATHS"
 
+# A configured version floor is fail-closed. Enforce it before availability
+# and auth probing so an old Conductor binary that cannot satisfy doctor/route
+# is not downgraded to the normal fail-open provider-unavailable path.
+enforce_conductor_minimum_version
+
 # Resolve which reviewer to use from the cascade.
 if ! resolve_reviewer; then
   unavailable_code="FAIL_OPEN_DEPENDENCY_MISSING"
@@ -2698,7 +2925,7 @@ else
   echo "==> Prompt context: $PROMPT_CONTEXT_DECISION ($PROMPT_CONTEXT_REASON)"
 fi
 if [ -n "$REVIEW_CONTEXT_FILE" ]; then
-  echo "==> Review context: $(basename "$REVIEW_CONTEXT_FILE")"
+  echo "==> Review context: $(basename "${REVIEW_CONTEXT_FILE_LABEL:-$REVIEW_CONTEXT_FILE}")"
 fi
 
 # --------------------------------------------------------------------------
@@ -3218,10 +3445,13 @@ append_findings_history_event() {
   commits="$(review_history_commits_since_prior "$prior_head" "$head")"
 
   findings_block="$(extract_findings_block "$output")"
-  if [ -z "$findings_block" ] && [ "$result" = "CODEX_REVIEW_FIXED" ]; then
+  if [ -z "$findings_block" ] && [ "$result" != "CODEX_REVIEW_CLEAN" ]; then
     findings_block="$(extract_review_body_without_sentinel "$output")"
   fi
   findings_count="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
+  if [ "$result" != "CODEX_REVIEW_CLEAN" ] && [ "$findings_count" -eq 0 ] && [ -n "$findings_block" ]; then
+    findings_count=1
+  fi
   if [ "$result" = "CODEX_REVIEW_FIXED" ] && [ "$auto_fixed_count" -eq 0 ] && [ -n "$findings_block" ]; then
     auto_fixed_count="$findings_count"
     [ "$auto_fixed_count" -gt 0 ] || auto_fixed_count=1
@@ -3731,10 +3961,9 @@ primary_provider_for_peer_review() {
 }
 
 conductor_invocation_label() {
-  local conductor_path subcommand
-  conductor_path="$(command -v conductor 2>/dev/null || printf 'conductor')"
+  local subcommand
   subcommand="$(conductor_subcommand_for_mode)"
-  printf '%s %s' "$conductor_path" "$subcommand"
+  printf '%s %s' "${CONDUCTOR_BIN_ARGV[*]}" "$subcommand"
 }
 
 print_malformed_sentinel_diagnostics() {
@@ -4374,6 +4603,8 @@ print_banner() {
   BANNER_PRINTED=true
 }
 
+enforce_conductor_minimum_version
+
 if ! run_conductor_route_preflight; then
   REVIEW_EXIT_REASON="provider-unavailable"
   REVIEW_FINDINGS_COUNT=0
@@ -4618,9 +4849,23 @@ for iter in $(seq 1 "$MAX_ITERATIONS"); do
       AUTOFIX_CHANGED_PATHS="$(changed_paths)"
       if [ -z "$AUTOFIX_CHANGED_PATHS" ]; then
         echo "==> $REVIEWER_LABEL emitted FIXED but no working-tree changes detected."
-        echo "    Treating as ambiguous — not blocking push."
-        log_skip_event other "ambiguous-fixed-no-changes:iter=${iter}"
-        exit 0
+        findings_block="$(extract_findings_block "$OUTPUT")"
+        REVIEW_FINDINGS_COUNT="$(printf '%s\n' "$findings_block" | grep -c '^- ' || true)"
+        if [ "$REVIEW_FINDINGS_COUNT" -eq 0 ] \
+          && [ -n "$(extract_review_body_without_sentinel "$OUTPUT")" ]; then
+          REVIEW_FINDINGS_COUNT=1
+        fi
+        echo "    Treating as ambiguous — blocking push and surfacing reviewer output."
+        tk_verdict fail "PUSH BLOCKED" "${REVIEWER_LABEL} returned FIXED without file changes"
+        printf '%s\n' "$OUTPUT" | sed 's/^/    /'
+        echo ""
+        echo "    Resolve the ambiguity or rerun the review before merging."
+        REVIEW_EXIT_REASON="ambiguous-fixed-no-changes"
+        print_summary
+        write_review_findings "$OUTPUT"
+        append_findings_history_event "CODEX_REVIEW_BLOCKED" "$iter" "$OUTPUT" 0
+        log_skip_event ran "ambiguous-fixed-no-changes:iter=${iter}:findings=${REVIEW_FINDINGS_COUNT}"
+        exit 1
       fi
 
       if [ "$WORKTREE_DIRTY_BEFORE_REVIEW" = true ]; then

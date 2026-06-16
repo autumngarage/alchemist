@@ -16,7 +16,7 @@
 #   bash scripts/open-pr.sh "Custom title"           # explicit title
 #
 # Exit contract (--auto-merge):
-#   exit 0 ⇔ `gh pr view <n> --json mergedAt --jq .mergedAt` is non-empty.
+#   exit 0 ⇔ GitHub reports the PR state as MERGED or has a populated mergedAt.
 #   Any other terminal state exits nonzero AND prints the PR URL with recovery
 #   commands as the last lines of output. This prevents the "swarm-agent orphan
 #   PR" failure mode where an agent's session ends mid-merge and leaves a
@@ -74,6 +74,7 @@ ORPHAN_PR_NUMBER=""
 BODY_FILE=""
 ADVISORY_AT_PR_OPEN=false
 PREFLIGHT_REQUIRED=true
+REPO_FULL_NAME=""
 
 on_exit() {
   local rc="$?"
@@ -99,7 +100,7 @@ print_orphan_warning() {
   # the misleading orphan banner.
   if [ -n "$ORPHAN_PR_NUMBER" ] \
     && command -v gh >/dev/null 2>&1 \
-    && [ -n "$(gh pr view "$ORPHAN_PR_NUMBER" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || true)" ]; then
+    && verify_pr_merged "$ORPHAN_PR_NUMBER" quiet >/dev/null 2>&1; then
     return 0
   fi
   touchstone_emit_event failed phase=open-pr reason=orphan-risk pr_number="$ORPHAN_PR_NUMBER"
@@ -114,17 +115,56 @@ print_orphan_warning() {
   } >&2
 }
 
-# Verify the PR actually merged. Returns 0 if mergedAt is non-empty, 1 otherwise.
-# Used as the post-merge sanity check that turns the script's exit contract from
-# "merge-pr.sh exited 0" (proxy) into "GitHub says it's merged" (truth).
+gh_pr_view() {
+  local pr_number="$1"
+  shift
+
+  if [ -n "$REPO_FULL_NAME" ]; then
+    gh pr view "$pr_number" --repo "$REPO_FULL_NAME" "$@"
+  else
+    gh pr view "$pr_number" "$@"
+  fi
+}
+
+# Verify the PR actually merged. Returns 0 if the PR is MERGED on GitHub,
+# 1 otherwise. Used as the post-merge sanity check that turns the script's
+# exit contract from "merge-pr.sh exited 0" (proxy) into "GitHub says it's
+# merged" (truth).
+#
+# GitHub can briefly report an empty mergedAt immediately after gh pr merge
+# returns, while state is already MERGED. Prefer state as authoritative, still
+# accept a populated mergedAt for compatibility, and retry once before declaring
+# failure. Keep this function self-contained; downstream regression tests source
+# it by itself.
 verify_pr_merged() {
   local pr_number="$1"
-  local merged_at
-  merged_at="$(gh pr view "$pr_number" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || echo "")"
-  if [ -n "$merged_at" ]; then
-    echo "==> Verified: PR #$pr_number merged at $merged_at"
-    return 0
-  fi
+  local quiet="${2:-}"
+  local attempt payload state merged_at
+
+  for attempt in 1 2; do
+    if [ -n "${REPO_FULL_NAME:-}" ]; then
+      payload="$(gh pr view "$pr_number" --repo "$REPO_FULL_NAME" --json state,mergedAt 2>/dev/null || echo '{}')"
+    else
+      payload="$(gh pr view "$pr_number" --json state,mergedAt 2>/dev/null || echo '{}')"
+    fi
+    state="$(printf '%s\n' "$payload" | sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)"
+    merged_at="$(printf '%s\n' "$payload" | sed -nE 's/.*"mergedAt"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1)"
+    if [ "$state" = "MERGED" ]; then
+      if [ "$quiet" != "quiet" ]; then
+        if [ -n "$merged_at" ]; then
+          echo "==> Verified: PR #$pr_number merged at $merged_at"
+        else
+          echo "==> Verified: PR #$pr_number state=MERGED (mergedAt not yet populated by API)"
+        fi
+      fi
+      return 0
+    fi
+    if [ -n "$merged_at" ]; then
+      [ "$quiet" = "quiet" ] || echo "==> Verified: PR #$pr_number merged at $merged_at"
+      return 0
+    fi
+    [ "$attempt" -eq 1 ] && sleep "${VERIFY_PR_MERGED_BACKOFF_SEC:-2}"
+  done
   return 1
 }
 
@@ -162,7 +202,7 @@ run_pr_body_protocol_preflight() {
   checker="$(find_pr_body_protocol_checker)" || return 0
   checker_rel="${checker#"$REPO_ROOT/"}"
 
-  if ! body="$(gh pr view "$pr_number" --json body --jq '.body // ""' 2>/dev/null)"; then
+  if ! body="$(gh_pr_view "$pr_number" --json body --jq '.body // ""' 2>/dev/null)"; then
     echo "ERROR: failed to read PR #$pr_number body for protocol preflight." >&2
     exit 1
   fi
@@ -435,6 +475,29 @@ find_issue_closing_refs() {
   '
 }
 
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/open-pr.sh [--auto-merge] [--cleanup-worktree] [--draft] [--base <branch>] [title]
+
+Push the current feature branch, create or reuse its GitHub PR, and optionally
+run the local merge gate.
+
+Options:
+  --auto-merge        Run merge-pr.sh after opening or finding the PR.
+  --cleanup-worktree  Remove this worktree after a verified auto-merge.
+  --draft             Open the PR as a draft.
+  --base <branch>     Target a non-default base branch.
+  -h, --help          Show this help.
+EOF
+}
+
+case "${1:-}" in
+  -h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 TEMPLATE_PATH="$REPO_ROOT/.github/pull_request_template.md"
 load_open_pr_review_config
@@ -446,6 +509,11 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 if ! DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"; then
   echo "ERROR: Failed to resolve default branch via 'gh'. Is gh authenticated?" >&2
+  echo "       Run: gh auth status" >&2
+  exit 1
+fi
+if ! REPO_FULL_NAME="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)"; then
+  echo "ERROR: Failed to resolve repository name via 'gh'. Is gh authenticated?" >&2
   echo "       Run: gh auth status" >&2
   exit 1
 fi
